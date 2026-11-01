@@ -1,0 +1,38 @@
+# STM32CubeIDE build output
+Debug/
+Release/
+*.o
+*.d
+*.su
+*.map
+*.elf
+*.bin
+*.hex
+*.list
+*.pre
+*.dmp
+*.gcda
+*.gcno
+*.gcov
+
+# Python environments and caches
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+runtime/
+.pytest_cache/
+
+# Editor-specific files
+.idea/
+.vscode/
+
+# Local logs, temporary files, and IDE backups
+*.log
+*.tmp
+*.bak
+
+# Operating-system metadata
+.DS_Store
+Thumbs.db
+desktop.ini
