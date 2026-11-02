@@ -26,7 +26,11 @@ extern "C" {
  *   12.. : uint16_t sample[0], sample[1], ...
  *
  * 双通道帧 0x30 的交错排列：
- *   12.. : CH1[0], CH2[0], CH1[1], CH2[1], ...
+ *   12.. : CH1[0], CH2[0], D[0], CH1[1], CH2[1], D[1], ...
+ *
+ * 扩展数字帧的通道标志为 0x07。每个采样点占 5 字节：
+ *   CH1 低字节、CH1 高字节、CH2 低字节、CH2 高字节、数字位图。
+ *   数字位图 bit0/bit1/bit2 分别对应数字通道 D1/D2/D3。
  *
  * 任务通道含义：
  *   CH1 = 电位器，ADC3_IN7 / PF9 / Arduino A2；
@@ -51,9 +55,9 @@ void App_ReceiverLoop(void);
 /* 固定帧头长度为 12 字节。 */
 #define APP_FRAME_HEADER_SIZE 12U
 
-/* 最坏情况是双通道交错的 500 点：12 + 4*500 + 2 = 2014 字节。 */
+/* 双通道模拟量加三路数字位图：12 + 5*500 + 2 = 2514 字节。 */
 #define APP_FRAME_MAX_SIZE \
-  (APP_FRAME_HEADER_SIZE + (4U * APP_FRAME_MAX_SAMPLES) + 2U)
+  (APP_FRAME_HEADER_SIZE + (5U * APP_FRAME_MAX_SAMPLES) + 2U)
 
 /* 以下统计接口适合在 CubeIDE 的 Expressions 窗口或断点中观察。 */
 uint32_t App_GetValidFrameCount(void);

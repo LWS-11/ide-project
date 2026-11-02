@@ -39,6 +39,8 @@ typedef struct
 
 static uint16_t adc_dma_buffer[ADC_DMA_HALF_WORDS];
 static uint16_t ready_frames[2][ADC_FRAME_HALF_WORDS];
+static uint8_t digital_dma_buffer[ADC_FRAME_PAIRS * 2U];
+static uint8_t ready_digital[2][ADC_FRAME_PAIRS];
 
 static volatile uint8_t ready_write_index;
 static volatile uint8_t latest_ready_index;
@@ -48,6 +50,7 @@ static volatile uint8_t adc_error_latched;
 static volatile uint8_t acquisition_running;
 static volatile uint32_t uart1_rx_bytes;
 static volatile uint32_t uart7_rx_bytes;
+static volatile uint16_t digital_sample_index;
 
 static UartRxRing uart1_rx;
 static UartRxRing uart7_rx;
@@ -199,11 +202,12 @@ static void Acquisition_ClearCapture(void)
   ready_write_index = 1U;
   ready_frame_available = 0U;
   capture_tick = 0U;
+  digital_sample_index = 0U;
 }
 
 static void Acquisition_Stop(void)
 {
-  (void)HAL_TIM_Base_Stop(&htim8);
+  (void)HAL_TIM_Base_Stop_IT(&htim8);
   (void)HAL_ADC_Stop_DMA(&hadc3);
   acquisition_running = 0U;
 }
@@ -220,7 +224,7 @@ static uint8_t Acquisition_Start(void)
     return 0U;
   }
 
-  if (HAL_TIM_Base_Start(&htim8) != HAL_OK)
+  if (HAL_TIM_Base_Start_IT(&htim8) != HAL_OK)
   {
     (void)HAL_ADC_Stop_DMA(&hadc3);
     return 0U;
@@ -440,6 +444,7 @@ void Acquisition_Process(void)
 
 uint8_t Acquisition_GetLatestFrame(uint16_t *ch1,
                                    uint16_t *ch2,
+                                   uint8_t *digital_samples,
                                    uint16_t sample_count,
                                    ProtocolScanMode *scan_mode,
                                    uint32_t *capture_tick_out)
@@ -447,7 +452,8 @@ uint8_t Acquisition_GetLatestFrame(uint16_t *ch1,
   uint8_t updated = 0U;
   uint8_t index;
 
-  if ((ch1 == NULL) || (ch2 == NULL) || (scan_mode == NULL) ||
+  if ((ch1 == NULL) || (ch2 == NULL) || (digital_samples == NULL) ||
+      (scan_mode == NULL) ||
       (capture_tick_out == NULL) || (sample_count != ADC_FRAME_PAIRS))
   {
     return 0U;
@@ -463,6 +469,7 @@ uint8_t Acquisition_GetLatestFrame(uint16_t *ch1,
       /* Rank 1 = PF9/pot is CH1, rank 2 = PA0/microphone is CH2. */
       ch1[i] = source[i * 2U];
       ch2[i] = source[(i * 2U) + 1U];
+      digital_samples[i] = ready_digital[index][i];
     }
 
     *scan_mode = current_scan_mode;
@@ -509,13 +516,15 @@ void Acquisition_GetStats(AcquisitionStats *stats)
   }
 }
 
-static void Acquisition_StoreDmaHalf(const uint16_t *source)
+static void Acquisition_StoreDmaHalf(const uint16_t *source,
+                                     const uint8_t *digital_source)
 {
   uint8_t next_index = (uint8_t)(ready_write_index ^ 1U);
 
   for (uint16_t i = 0U; i < ADC_FRAME_HALF_WORDS; ++i)
   {
     ready_frames[next_index][i] = source[i];
+    ready_digital[next_index][i / 2U] = digital_source[i / 2U];
   }
 
   latest_ready_index = next_index;
@@ -524,11 +533,31 @@ static void Acquisition_StoreDmaHalf(const uint16_t *source)
   ready_frame_available = 1U;
 }
 
+void Acquisition_TimerTick(void)
+{
+  uint8_t value = 0U;
+
+  if (!acquisition_running)
+  {
+    return;
+  }
+
+  if ((DIG_CH1_GPIO_Port->IDR & DIG_CH1_Pin) != 0U) value |= 0x01U;
+  if ((DIG_CH2_GPIO_Port->IDR & DIG_CH2_Pin) != 0U) value |= 0x02U;
+  if ((DIG_CH3_GPIO_Port->IDR & DIG_CH3_Pin) != 0U) value |= 0x04U;
+
+  digital_dma_buffer[digital_sample_index++] = value;
+  if (digital_sample_index >= (ADC_FRAME_PAIRS * 2U))
+  {
+    digital_sample_index = 0U;
+  }
+}
+
 void HAL_ADC_ConvHalfCpltCallback(ADC_HandleTypeDef *hadc)
 {
   if (hadc->Instance == ADC3)
   {
-    Acquisition_StoreDmaHalf(&adc_dma_buffer[0]);
+    Acquisition_StoreDmaHalf(&adc_dma_buffer[0], &digital_dma_buffer[0]);
   }
 }
 
@@ -536,7 +565,8 @@ void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc)
 {
   if (hadc->Instance == ADC3)
   {
-    Acquisition_StoreDmaHalf(&adc_dma_buffer[ADC_FRAME_HALF_WORDS]);
+    Acquisition_StoreDmaHalf(&adc_dma_buffer[ADC_FRAME_HALF_WORDS],
+                             &digital_dma_buffer[ADC_FRAME_PAIRS]);
   }
 }
 

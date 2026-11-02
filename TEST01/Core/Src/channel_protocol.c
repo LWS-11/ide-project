@@ -73,16 +73,18 @@ uint8_t Protocol_IntervalToMode(uint16_t interval_us, ProtocolScanMode *mode)
   }
 }
 
-uint16_t Protocol_BuildDualChannelFrame(const uint16_t *ch1_mv,
-                                        const uint16_t *ch2_mv,
-                                        uint16_t sample_count,
-                                        uint16_t interval_us,
-                                        uint16_t sequence,
-                                        uint8_t *frame)
+uint16_t Protocol_BuildFullFrame(const uint16_t *ch1_mv,
+                                 const uint16_t *ch2_mv,
+                                 const uint8_t *digital_samples,
+                                 uint16_t sample_count,
+                                 uint16_t interval_us,
+                                 uint16_t sequence,
+                                 uint8_t *frame)
 {
   uint16_t payload_index;
 
-  if ((ch1_mv == NULL) || (ch2_mv == NULL) || (frame == NULL) ||
+  if ((ch1_mv == NULL) || (ch2_mv == NULL) ||
+      (digital_samples == NULL) || (frame == NULL) ||
       (sample_count == 0U) || (sample_count > 500U))
   {
     return 0U;
@@ -98,7 +100,7 @@ uint16_t Protocol_BuildDualChannelFrame(const uint16_t *ch1_mv,
   frame[7] = (uint8_t)(sample_count >> 8U);
   frame[8] = (uint8_t)(interval_us & 0x00FFU);
   frame[9] = (uint8_t)(interval_us >> 8U);
-  frame[10] = PROTOCOL_CHANNEL_FLAG_DUAL;
+  frame[10] = PROTOCOL_CHANNEL_FLAG_ALL;
   frame[11] = 0U;
 
   payload_index = PROTOCOL_DATA_HEADER_SIZE;
@@ -108,6 +110,7 @@ uint16_t Protocol_BuildDualChannelFrame(const uint16_t *ch1_mv,
     frame[payload_index++] = (uint8_t)(ch1_mv[i] >> 8U);
     frame[payload_index++] = (uint8_t)(ch2_mv[i] & 0x00FFU);
     frame[payload_index++] = (uint8_t)(ch2_mv[i] >> 8U);
+    frame[payload_index++] = (uint8_t)(digital_samples[i] & 0x07U);
   }
 
   uint16_t crc = Protocol_Crc16(frame, payload_index);

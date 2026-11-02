@@ -28,6 +28,8 @@ extern "C" {
 #define PROTOCOL_CHANNEL_FLAG_CH1       0x01U
 #define PROTOCOL_CHANNEL_FLAG_CH2       0x02U
 #define PROTOCOL_CHANNEL_FLAG_DUAL      0x03U
+#define PROTOCOL_CHANNEL_FLAG_DIGITAL   0x04U
+#define PROTOCOL_CHANNEL_FLAG_ALL       0x07U
 
 /*
  * Signal meaning is part of the application contract:
@@ -36,8 +38,10 @@ extern "C" {
  */
 #define PROTOCOL_SAMPLES_PER_CHANNEL    500U
 #define PROTOCOL_DATA_HEADER_SIZE       12U
-#define PROTOCOL_DUAL_FRAME_SIZE        (PROTOCOL_DATA_HEADER_SIZE + \
-                                         (PROTOCOL_SAMPLES_PER_CHANNEL * 4U) + 2U)
+#define PROTOCOL_BYTES_PER_POINT        5U
+#define PROTOCOL_FULL_FRAME_SIZE        (PROTOCOL_DATA_HEADER_SIZE + \
+                                         (PROTOCOL_SAMPLES_PER_CHANNEL * \
+                                          PROTOCOL_BYTES_PER_POINT) + 2U)
 
 #define PROTOCOL_CONTROL_COMMAND_SET_TIMEBASE 0x01U
 #define PROTOCOL_CONTROL_FRAME_SIZE     9U
@@ -60,12 +64,13 @@ typedef struct
 
 uint16_t Protocol_Crc16(const uint8_t *data, uint16_t length);
 
-uint16_t Protocol_BuildDualChannelFrame(const uint16_t *ch1_mv,
-                                        const uint16_t *ch2_mv,
-                                        uint16_t sample_count,
-                                        uint16_t interval_us,
-                                        uint16_t sequence,
-                                        uint8_t *frame);
+uint16_t Protocol_BuildFullFrame(const uint16_t *ch1_mv,
+                                 const uint16_t *ch2_mv,
+                                 const uint8_t *digital_samples,
+                                 uint16_t sample_count,
+                                 uint16_t interval_us,
+                                 uint16_t sequence,
+                                 uint8_t *frame);
 
 uint16_t Protocol_ScanIntervalUs(ProtocolScanMode mode);
 uint8_t Protocol_IntervalToMode(uint16_t interval_us, ProtocolScanMode *mode);

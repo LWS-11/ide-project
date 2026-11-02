@@ -16,10 +16,13 @@ TYPE_DUAL = 0x30
 FLAG_CH1 = 0x01
 FLAG_CH2 = 0x02
 FLAG_DUAL = 0x03
+FLAG_DIGITAL = 0x04
+FLAG_ALL = 0x07
 
 DATA_HEADER_SIZE = 12
 CONTROL_FRAME_SIZE = 9
 SAMPLES_PER_CHANNEL = 500
+BYTES_PER_POINT = 5
 
 SCAN_10MS = 0
 SCAN_5MS = 1
@@ -58,6 +61,7 @@ class DataFrame:
     sequence: int
     ch1_mv: tuple[int, ...]
     ch2_mv: tuple[int, ...]
+    digital: tuple[int, ...]
 
     @property
     def scan_mode(self) -> int:
@@ -95,13 +99,21 @@ def build_data_frame(
     ch2_mv: Iterable[int],
     mode: int,
     sequence: int,
+    digital_samples: Iterable[int] | None = None,
 ) -> bytes:
     """Build a dual-channel data frame for tests and replay."""
 
     ch1 = [int(value) & 0xFFFF for value in ch1_mv]
     ch2 = [int(value) & 0xFFFF for value in ch2_mv]
+    digital = (
+        [0] * len(ch1)
+        if digital_samples is None
+        else [int(value) & 0x07 for value in digital_samples]
+    )
     if not ch1 or len(ch1) != len(ch2) or len(ch1) > 500:
         raise ValueError("CH1/CH2 must contain the same positive number of points")
+    if len(digital) != len(ch1):
+        raise ValueError("Digital sample count must match the analog count")
     if mode not in (SCAN_10MS, SCAN_5MS, SCAN_1MS):
         raise ValueError(f"Invalid scan mode: {mode}")
 
@@ -112,13 +124,14 @@ def build_data_frame(
         + int(sequence & 0xFFFF).to_bytes(2, "little")
         + points.to_bytes(2, "little")
         + SCAN_INTERVALS_US[mode].to_bytes(2, "little")
-        + bytes((FLAG_DUAL, 0))
+        + bytes((FLAG_ALL, 0))
     )
 
     payload = bytearray()
-    for value_ch1, value_ch2 in zip(ch1, ch2):
+    for value_ch1, value_ch2, digital_value in zip(ch1, ch2, digital):
         payload.extend(value_ch1.to_bytes(2, "little"))
         payload.extend(value_ch2.to_bytes(2, "little"))
+        payload.append(digital_value)
 
     without_crc = header + payload
     crc = crc16_ccitt_false(without_crc)
@@ -137,15 +150,24 @@ def decode_data_frame(frame: bytes) -> DataFrame:
     flags = frame[10]
     if point_count < 1 or point_count > 500:
         raise ValueError("Invalid point count")
-    if flags not in (FLAG_CH1, FLAG_CH2, FLAG_DUAL):
+    if flags & ~FLAG_ALL:
         raise ValueError("Invalid channel flags")
 
-    channel_count = {FLAG_CH1: 1, FLAG_CH2: 1, FLAG_DUAL: 2}[flags]
-    expected_type = {FLAG_CH1: TYPE_CH1, FLAG_CH2: TYPE_CH2, FLAG_DUAL: TYPE_DUAL}[flags]
+    analog_flags = flags & FLAG_DUAL
+    channel_count = {FLAG_CH1: 1, FLAG_CH2: 1, FLAG_DUAL: 2}.get(analog_flags)
+    expected_type = {
+        FLAG_CH1: TYPE_CH1,
+        FLAG_CH2: TYPE_CH2,
+        FLAG_DUAL: TYPE_DUAL,
+    }.get(analog_flags)
+    if channel_count is None or expected_type is None:
+        raise ValueError("Invalid channel flags")
     if frame_type != expected_type:
         raise ValueError("Frame type and channel flags disagree")
 
-    payload_length = point_count * channel_count * 2
+    has_digital = bool(flags & FLAG_DIGITAL)
+    bytes_per_point = channel_count * 2 + int(has_digital)
+    payload_length = point_count * bytes_per_point
     expected_length = DATA_HEADER_SIZE + payload_length + 2
     if len(frame) != expected_length:
         raise ValueError("Invalid data-frame length")
@@ -157,21 +179,23 @@ def decode_data_frame(frame: bytes) -> DataFrame:
 
     ch1: list[int] = []
     ch2: list[int] = []
+    digital: list[int] = []
     index = DATA_HEADER_SIZE
-    if flags == FLAG_CH1:
-        for _ in range(point_count):
+    for _ in range(point_count):
+        if analog_flags == FLAG_CH1:
             ch1.append(int.from_bytes(frame[index : index + 2], "little"))
             index += 2
-    elif flags == FLAG_CH2:
-        for _ in range(point_count):
+        elif analog_flags == FLAG_CH2:
             ch2.append(int.from_bytes(frame[index : index + 2], "little"))
             index += 2
-    else:
-        for _ in range(point_count):
+        else:
             ch1.append(int.from_bytes(frame[index : index + 2], "little"))
             index += 2
             ch2.append(int.from_bytes(frame[index : index + 2], "little"))
             index += 2
+        if has_digital:
+            digital.append(frame[index] & 0x07)
+            index += 1
 
     return DataFrame(
         frame_type=frame_type,
@@ -181,6 +205,7 @@ def decode_data_frame(frame: bytes) -> DataFrame:
         sequence=int.from_bytes(frame[4:6], "little"),
         ch1_mv=tuple(ch1),
         ch2_mv=tuple(ch2),
+        digital=tuple(digital),
     )
 
 
@@ -234,7 +259,7 @@ class FrameParser:
                 if len(self._buffer) < DATA_HEADER_SIZE:
                     break
                 flags = self._buffer[10]
-                if flags not in (FLAG_CH1, FLAG_CH2, FLAG_DUAL):
+                if flags & ~FLAG_ALL:
                     self.unknown_frames += 1
                     self.discarded_bytes += 1
                     del self._buffer[0]
@@ -245,8 +270,17 @@ class FrameParser:
                     self.discarded_bytes += 1
                     del self._buffer[0]
                     continue
-                channel_count = 2 if flags == FLAG_DUAL else 1
-                frame_size = DATA_HEADER_SIZE + point_count * channel_count * 2 + 2
+                analog_flags = flags & FLAG_DUAL
+                if analog_flags not in (FLAG_CH1, FLAG_CH2, FLAG_DUAL):
+                    self.unknown_frames += 1
+                    self.discarded_bytes += 1
+                    del self._buffer[0]
+                    continue
+                channel_count = 2 if analog_flags == FLAG_DUAL else 1
+                bytes_per_point = channel_count * 2
+                if flags & FLAG_DIGITAL:
+                    bytes_per_point += 1
+                frame_size = DATA_HEADER_SIZE + point_count * bytes_per_point + 2
             else:
                 break
 

@@ -43,10 +43,12 @@
 
 #define PLOT_LEFT 42
 #define PLOT_RIGHT 474
-#define PLOT_TOP 48
+#define PLOT_TOP 78
+#define ANALOG_PLOT_BOTTOM 168
+#define DIGITAL_AREA_TOP 176
 #define PLOT_BOTTOM 236
 #define PLOT_WIDTH ((PLOT_RIGHT - PLOT_LEFT) + 1)
-#define PLOT_HEIGHT ((PLOT_BOTTOM - PLOT_TOP) + 1)
+#define PLOT_HEIGHT ((ANALOG_PLOT_BOTTOM - PLOT_TOP) + 1)
 
 /* ============================ 2. 上下行协议 ============================ */
 #define FRAME_SYNC_0 0xA5U
@@ -57,7 +59,9 @@
 #define FRAME_TYPE_CH1_CH2 0x30U
 #define FRAME_FLAG_CH1 0x01U
 #define FRAME_FLAG_CH2 0x02U
+#define FRAME_FLAG_DIGITAL 0x04U
 #define FRAME_FLAG_CH1_CH2 (FRAME_FLAG_CH1 | FRAME_FLAG_CH2)
+#define FRAME_FLAG_ALL (FRAME_FLAG_CH1_CH2 | FRAME_FLAG_DIGITAL)
 
 #define RX_BYTES_PER_LOOP 1024U
 #define BUTTON_DEBOUNCE_MS 35U
@@ -78,6 +82,16 @@
 #define TOUCH_BUTTON_10MS_X0 276
 #define TOUCH_BUTTON_5MS_X0 344
 #define TOUCH_BUTTON_1MS_X0 412
+
+#define CHANNEL_BUTTON_Y0 42
+#define CHANNEL_BUTTON_Y1 68
+#define CHANNEL_BUTTON_WIDTH 54
+#define CHANNEL_BUTTON_GAP 6
+#define CHANNEL_BUTTON_X0 8
+#define CHANNEL_BUTTON_COUNT 5U
+
+#define DIGITAL_CHANNEL_COUNT 3U
+#define DIGITAL_LANE_HEIGHT 18
 
 /* ============================ 3. 运行状态 ============================ */
 /* 两个帧缓冲区都位于外部 SDRAM，元素类型是 RGB565 的 16 位颜色。 */
@@ -105,8 +119,10 @@ static uint8_t pc_command_length;
  */
 static uint16_t samples_ch1[APP_FRAME_MAX_SAMPLES];
 static uint16_t samples_ch2[APP_FRAME_MAX_SAMPLES];
+static uint8_t samples_digital[APP_FRAME_MAX_SAMPLES];
 static uint16_t sample_count_ch1;
 static uint16_t sample_count_ch2;
+static uint16_t sample_count_digital;
 static uint16_t sample_interval_us;
 static uint16_t frame_sequence;
 static volatile bool frame_ready;
@@ -121,6 +137,7 @@ static bool waveform_paused;
 static bool touch_was_down;
 static uint32_t touch_last_change_ms;
 static bool touch_ready;
+static bool channel_visible[CHANNEL_BUTTON_COUNT];
 
 /*
  * 数组下标就是 timebase_index。
@@ -208,6 +225,9 @@ static uint16_t rgb565(uint8_t red, uint8_t green, uint8_t blue)
 #define COLOR_OK rgb565(64, 224, 112)
 #define COLOR_WARN rgb565(255, 178, 48)
 #define COLOR_ERROR rgb565(255, 72, 72)
+#define COLOR_DIGITAL1 rgb565(80, 255, 128)
+#define COLOR_DIGITAL2 rgb565(255, 108, 200)
+#define COLOR_DIGITAL3 rgb565(150, 170, 255)
 
 /* Keep the task's physical meaning visible next to each trace. */
 #define CHANNEL_LABEL_CH1 "CH1 POT"
@@ -408,6 +428,45 @@ static void draw_timebase_buttons(uint16_t *framebuffer)
   }
 }
 
+static const char *const channel_labels[CHANNEL_BUTTON_COUNT] =
+{
+  "A1", "A2", "D1", "D2", "D3"
+};
+
+static uint16_t channel_color(uint8_t index)
+{
+  switch (index)
+  {
+    case 0U: return COLOR_CH1;
+    case 1U: return COLOR_CH2;
+    case 2U: return COLOR_DIGITAL1;
+    case 3U: return COLOR_DIGITAL2;
+    default: return COLOR_DIGITAL3;
+  }
+}
+
+static int channel_button_x(uint8_t index)
+{
+  return CHANNEL_BUTTON_X0 +
+         ((int)index * (CHANNEL_BUTTON_WIDTH + CHANNEL_BUTTON_GAP));
+}
+
+static void draw_channel_buttons(uint16_t *framebuffer)
+{
+  for (uint8_t index = 0U; index < CHANNEL_BUTTON_COUNT; ++index)
+  {
+    int x0 = channel_button_x(index);
+    int x1 = x0 + CHANNEL_BUTTON_WIDTH - 1;
+    uint16_t color = channel_color(index);
+
+    fill_rect(framebuffer, x0, CHANNEL_BUTTON_Y0, x1, CHANNEL_BUTTON_Y1,
+              channel_visible[index] ? color : COLOR_PANEL);
+    draw_text(framebuffer, x0 + 18, CHANNEL_BUTTON_Y0 + 8,
+              channel_labels[index],
+              channel_visible[index] ? COLOR_BACKGROUND : COLOR_MUTED, 1);
+  }
+}
+
 static void draw_grid(uint16_t *framebuffer)
 {
   uint8_t i;
@@ -416,7 +475,9 @@ static void draw_grid(uint16_t *framebuffer)
             (int)LCD_HEIGHT - 1, COLOR_BACKGROUND);
   fill_rect(framebuffer, 0, 0, (int)LCD_WIDTH - 1, 38, COLOR_PANEL);
   fill_rect(framebuffer, (int)PLOT_LEFT, (int)PLOT_TOP,
-            (int)PLOT_RIGHT, (int)PLOT_BOTTOM, COLOR_PLOT);
+            (int)PLOT_RIGHT, ANALOG_PLOT_BOTTOM, COLOR_PLOT);
+  fill_rect(framebuffer, 0, DIGITAL_AREA_TOP,
+            (int)LCD_WIDTH - 1, (int)PLOT_BOTTOM, COLOR_PANEL);
 
   /* 10 个水平时间格。 */
   for (i = 0; i <= 10U; ++i)
@@ -434,14 +495,24 @@ static void draw_grid(uint16_t *framebuffer)
            (i == 0U || i == 4U) ? COLOR_GRID_MAJOR : COLOR_GRID);
   }
 
-  draw_text(framebuffer, 4, 52, "3.0", COLOR_MUTED, 1);
-  draw_text(framebuffer, 4, 142, "1.5", COLOR_MUTED, 1);
-  draw_text(framebuffer, 4, 226, "0.0", COLOR_MUTED, 1);
+  for (i = 0U; i < DIGITAL_CHANNEL_COUNT; ++i)
+  {
+    int y = DIGITAL_AREA_TOP + 7 + ((int)i * DIGITAL_LANE_HEIGHT);
+    line_h(framebuffer, 0, LCD_WIDTH - 1, y + DIGITAL_LANE_HEIGHT - 4,
+           COLOR_GRID);
+    draw_text(framebuffer, 5, y - 3, channel_labels[2U + i],
+              channel_color(2U + i), 1);
+  }
+
+  draw_text(framebuffer, 4, 82, "3.0", COLOR_MUTED, 1);
+  draw_text(framebuffer, 4, 123, "1.5", COLOR_MUTED, 1);
+  draw_text(framebuffer, 4, 161, "0.0", COLOR_MUTED, 1);
   draw_text(framebuffer, 4, 4, "T/DIV", COLOR_MUTED, 1);
   draw_text(framebuffer, 8, 248,
             touch_ready ? "TOUCH OK" : "TOUCH ERR",
             touch_ready ? COLOR_CH1 : COLOR_ERROR, 1);
   draw_timebase_buttons(framebuffer);
+  draw_channel_buttons(framebuffer);
 }
 
 /*
@@ -492,9 +563,9 @@ static void draw_waveform(uint16_t *framebuffer, const uint16_t *data,
     if (maximum > 3000U) maximum = 3000U;
     if (minimum > 3000U) minimum = 3000U;
 
-    y_top = PLOT_BOTTOM -
+    y_top = ANALOG_PLOT_BOTTOM -
             ((int)maximum * (PLOT_HEIGHT - 1)) / 3000;
-    y_bottom = PLOT_BOTTOM -
+    y_bottom = ANALOG_PLOT_BOTTOM -
                ((int)minimum * (PLOT_HEIGHT - 1)) / 3000;
     if (y_bottom == y_top)
     {
@@ -515,6 +586,69 @@ static void draw_waveform(uint16_t *framebuffer, const uint16_t *data,
              (y_top + y_bottom) / 2, color);
     }
     previous_center = (y_top + y_bottom) / 2;
+    have_previous = true;
+  }
+}
+
+static void draw_digital_waveform(uint16_t *framebuffer, uint8_t bit_mask,
+                                  uint8_t digital_index)
+{
+  int lane_y = DIGITAL_AREA_TOP + 7 +
+               ((int)digital_index * DIGITAL_LANE_HEIGHT);
+  int y_high = lane_y - 5;
+  int y_low = lane_y + 5;
+  int previous_center = y_low;
+  bool have_previous = false;
+
+  if (!channel_visible[2U + digital_index] || (sample_count_digital == 0U))
+  {
+    return;
+  }
+
+  for (int x = PLOT_LEFT + 1; x <= PLOT_RIGHT; ++x)
+  {
+    uint16_t first = (uint16_t)(((uint32_t)(x - PLOT_LEFT) *
+                                 sample_count_digital) / PLOT_WIDTH);
+    uint16_t last = (uint16_t)(((uint32_t)(x - PLOT_LEFT + 1U) *
+                                sample_count_digital) / PLOT_WIDTH);
+    bool any_high = false;
+    bool any_low = false;
+    int y;
+
+    if (first >= sample_count_digital) first = sample_count_digital - 1U;
+    if (last <= first) last = first + 1U;
+    if (last > sample_count_digital) last = sample_count_digital;
+
+    for (uint16_t index = first; index < last; ++index)
+    {
+      if ((samples_digital[index] & bit_mask) != 0U)
+      {
+        any_high = true;
+      }
+      else
+      {
+        any_low = true;
+      }
+    }
+
+    if (any_high && any_low)
+    {
+      line_v(framebuffer, x, y_high, y_low,
+             channel_color(2U + digital_index));
+      y = (y_high + y_low) / 2;
+    }
+    else
+    {
+      y = any_high ? y_high : y_low;
+      pixel_put(framebuffer, x, y, channel_color(2U + digital_index));
+    }
+
+    if (have_previous)
+    {
+      line_v(framebuffer, x, previous_center, y,
+             channel_color(2U + digital_index));
+    }
+    previous_center = y;
     have_previous = true;
   }
 }
@@ -632,12 +766,27 @@ static void render_received_frame(void)
   uint16_t *framebuffer = framebuffers[active_framebuffer ^ 1U];
 
   draw_grid(framebuffer);
-  draw_waveform(framebuffer, samples_ch1, sample_count_ch1, COLOR_CH1);
-  draw_waveform(framebuffer, samples_ch2, sample_count_ch2, COLOR_CH2);
+  if (channel_visible[0])
+  {
+    draw_waveform(framebuffer, samples_ch1, sample_count_ch1, COLOR_CH1);
+  }
+  if (channel_visible[1])
+  {
+    draw_waveform(framebuffer, samples_ch2, sample_count_ch2, COLOR_CH2);
+  }
+  draw_digital_waveform(framebuffer, 0x01U, 0U);
+  draw_digital_waveform(framebuffer, 0x02U, 1U);
+  draw_digital_waveform(framebuffer, 0x04U, 2U);
   draw_channel_reading(framebuffer, 50, CHANNEL_LABEL_CH1, COLOR_CH1,
                        samples_ch1, sample_count_ch1);
   draw_channel_reading(framebuffer, 168, CHANNEL_LABEL_CH2, COLOR_CH2,
                        samples_ch2, sample_count_ch2);
+
+  if (!channel_visible[0] && !channel_visible[1] &&
+      !channel_visible[2] && !channel_visible[3] && !channel_visible[4])
+  {
+    draw_text(framebuffer, 150, 108, "ALL CHANNELS OFF", COLOR_WARN, 1);
+  }
 
   sequence_text[0] = 'S';
   sequence_text[1] = 'E';
@@ -891,6 +1040,17 @@ static void poll_pause_button(void)
   }
 }
 
+static void select_channel(uint8_t index)
+{
+  if (index >= CHANNEL_BUTTON_COUNT)
+  {
+    return;
+  }
+
+  channel_visible[index] = !channel_visible[index];
+  refresh_timebase_screen();
+}
+
 static void poll_timebase_touch(void)
 {
   uint16_t x;
@@ -913,26 +1073,42 @@ static void poll_timebase_touch(void)
 
   touch_was_down = pressed;
   touch_last_change_ms = now;
-  if (!pressed ||
-      (y < TOUCH_BUTTON_Y0) || (y > TOUCH_BUTTON_Y1))
+  if (!pressed)
   {
     return;
   }
 
-  if ((x >= TOUCH_BUTTON_10MS_X0) &&
-      (x < (TOUCH_BUTTON_10MS_X0 + TOUCH_BUTTON_WIDTH)))
+  if ((y >= TOUCH_BUTTON_Y0) && (y <= TOUCH_BUTTON_Y1))
   {
-    select_timebase(0U);
+    if ((x >= TOUCH_BUTTON_10MS_X0) &&
+        (x < (TOUCH_BUTTON_10MS_X0 + TOUCH_BUTTON_WIDTH)))
+    {
+      select_timebase(0U);
+    }
+    else if ((x >= TOUCH_BUTTON_5MS_X0) &&
+             (x < (TOUCH_BUTTON_5MS_X0 + TOUCH_BUTTON_WIDTH)))
+    {
+      select_timebase(1U);
+    }
+    else if ((x >= TOUCH_BUTTON_1MS_X0) &&
+             (x < (TOUCH_BUTTON_1MS_X0 + TOUCH_BUTTON_WIDTH)))
+    {
+      select_timebase(2U);
+    }
+    return;
   }
-  else if ((x >= TOUCH_BUTTON_5MS_X0) &&
-           (x < (TOUCH_BUTTON_5MS_X0 + TOUCH_BUTTON_WIDTH)))
+
+  if ((y >= CHANNEL_BUTTON_Y0) && (y <= CHANNEL_BUTTON_Y1))
   {
-    select_timebase(1U);
-  }
-  else if ((x >= TOUCH_BUTTON_1MS_X0) &&
-           (x < (TOUCH_BUTTON_1MS_X0 + TOUCH_BUTTON_WIDTH)))
-  {
-    select_timebase(2U);
+    for (uint8_t index = 0U; index < CHANNEL_BUTTON_COUNT; ++index)
+    {
+      int x0 = channel_button_x(index);
+      if ((x >= x0) && (x < (x0 + CHANNEL_BUTTON_WIDTH)))
+      {
+        select_channel(index);
+        break;
+      }
+    }
   }
 }
 
@@ -952,25 +1128,27 @@ static bool validate_and_store_frame(BoardLinkSource source)
   uint8_t frame_type = frame_buffer[3];
   uint8_t frame_flags = frame_buffer[10];
   uint16_t payload_bytes;
-  uint16_t expected_flags;
+  uint8_t required_flags;
+  uint8_t analog_channels;
+  uint8_t has_digital;
   uint16_t received_crc;
   uint16_t calculated_crc;
   uint16_t index;
 
   if (frame_type == FRAME_TYPE_CH1)
   {
-    expected_flags = FRAME_FLAG_CH1;
-    payload_bytes = (uint16_t)(2U * count);
+    required_flags = FRAME_FLAG_CH1;
+    analog_channels = 1U;
   }
   else if (frame_type == FRAME_TYPE_CH2)
   {
-    expected_flags = FRAME_FLAG_CH2;
-    payload_bytes = (uint16_t)(2U * count);
+    required_flags = FRAME_FLAG_CH2;
+    analog_channels = 1U;
   }
   else if (frame_type == FRAME_TYPE_CH1_CH2)
   {
-    expected_flags = FRAME_FLAG_CH1_CH2;
-    payload_bytes = (uint16_t)(4U * count);
+    required_flags = FRAME_FLAG_CH1_CH2;
+    analog_channels = 2U;
   }
   else
   {
@@ -979,12 +1157,18 @@ static bool validate_and_store_frame(BoardLinkSource source)
     return false;
   }
 
-  if ((frame_flags != expected_flags) || (frame_buffer[11] != 0U))
+  has_digital = ((frame_flags & FRAME_FLAG_DIGITAL) != 0U) ? 1U : 0U;
+  if (((frame_flags & required_flags) != required_flags) ||
+      ((frame_flags & (uint8_t)~(required_flags | FRAME_FLAG_DIGITAL)) != 0U) ||
+      (frame_buffer[11] != 0U))
   {
     visual_state = RX_FORMAT_ERROR;
     send_frame_ack("FORMAT", sequence, count, interval, source);
     return false;
   }
+
+  payload_bytes = (uint16_t)(
+      count * ((analog_channels * 2U) + has_digital));
   if ((count == 0U) || (count > APP_FRAME_MAX_SAMPLES) ||
       (interval < 10U) || (interval > 10000U))
   {
@@ -1006,26 +1190,32 @@ static bool validate_and_store_frame(BoardLinkSource source)
 
   for (index = 0U; index < count; ++index)
   {
+    uint16_t step = (uint16_t)((analog_channels * 2U) + has_digital);
+    uint16_t sample_offset = (uint16_t)(12U + (step * index));
+
     if ((frame_type == FRAME_TYPE_CH1) ||
         (frame_type == FRAME_TYPE_CH1_CH2))
     {
-      uint16_t offset = (frame_type == FRAME_TYPE_CH1_CH2)
-                            ? (uint16_t)(4U * index)
-                            : (uint16_t)(2U * index);
-      uint16_t value = (uint16_t)frame_buffer[12U + offset] |
-                       ((uint16_t)frame_buffer[13U + offset] << 8);
+      uint16_t value = (uint16_t)frame_buffer[sample_offset] |
+                       ((uint16_t)frame_buffer[sample_offset + 1U] << 8);
       samples_ch1[index] = (value > 3000U) ? 3000U : value;
     }
 
     if ((frame_type == FRAME_TYPE_CH2) ||
         (frame_type == FRAME_TYPE_CH1_CH2))
     {
-      uint16_t offset = (frame_type == FRAME_TYPE_CH1_CH2)
-                            ? (uint16_t)((4U * index) + 2U)
-                            : (uint16_t)(2U * index);
-      uint16_t value = (uint16_t)frame_buffer[12U + offset] |
-                       ((uint16_t)frame_buffer[13U + offset] << 8);
+      uint16_t channel_offset =
+          (frame_type == FRAME_TYPE_CH1_CH2) ? 2U : 0U;
+      uint16_t value = (uint16_t)frame_buffer[sample_offset + channel_offset] |
+                       ((uint16_t)frame_buffer[sample_offset +
+                                               channel_offset + 1U] << 8);
       samples_ch2[index] = (value > 3000U) ? 3000U : value;
+    }
+
+    if (has_digital != 0U)
+    {
+      samples_digital[index] =
+          frame_buffer[sample_offset + (analog_channels * 2U)] & 0x07U;
     }
   }
 
@@ -1040,6 +1230,7 @@ static bool validate_and_store_frame(BoardLinkSource source)
   {
     sample_count_ch2 = count;
   }
+  sample_count_digital = (has_digital != 0U) ? count : 0U;
   sample_interval_us = interval;
   /*
    * 等待采集端确认新档位期间，保留用户刚选择的界面状态，避免旧数据帧
@@ -1142,13 +1333,21 @@ static void parser_push(uint8_t byte, BoardLinkSource source)
     uint16_t count = (uint16_t)frame_buffer[6] |
                      ((uint16_t)frame_buffer[7] << 8);
     uint8_t type = frame_buffer[3];
+    uint8_t flags = frame_buffer[10];
     bool valid_type = (type == FRAME_TYPE_CH1) ||
                       (type == FRAME_TYPE_CH2) ||
                       (type == FRAME_TYPE_CH1_CH2);
+    bool valid_flags =
+        ((flags & (uint8_t)~FRAME_FLAG_ALL) == 0U) &&
+        ((flags & FRAME_FLAG_CH1_CH2) != 0U);
     if ((frame_buffer[2] == FRAME_VERSION) && valid_type &&
-        (count != 0U) && (count <= APP_FRAME_MAX_SAMPLES))
+        valid_flags && (count != 0U) && (count <= APP_FRAME_MAX_SAMPLES))
     {
       uint16_t channel_words = (type == FRAME_TYPE_CH1_CH2) ? 4U : 2U;
+      if ((flags & FRAME_FLAG_DIGITAL) != 0U)
+      {
+        channel_words++;
+      }
       expected_frame_length = (uint16_t)(
           APP_FRAME_HEADER_SIZE + (channel_words * count) + 2U);
       frame_header_valid = true;
@@ -1278,6 +1477,10 @@ void App_ReceiverInit(void)
   timebase_failed = false;
   timebase_failed_at_ms = 0U;
   waveform_paused = false;
+  for (uint8_t index = 0U; index < CHANNEL_BUTTON_COUNT; ++index)
+  {
+    channel_visible[index] = true;
+  }
   pc_command_length = 0U;
   touch_was_down = false;
   touch_last_change_ms = HAL_GetTick();

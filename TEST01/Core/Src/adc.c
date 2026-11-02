@@ -62,14 +62,8 @@ void MX_ADC3_Init(void)
 
   /** Configure for the selected ADC regular channel its corresponding rank in the sequencer and its sample time.
   */
-  /*
-   * Task channel order:
-   * rank 1 = ADC3_IN7 / PF9 / Arduino A2 = CH1 potentiometer;
-   * rank 2 = ADC3_IN0 / PA0 / Arduino A0 = CH2 microphone.
-   */
   sConfig.Channel = ADC_CHANNEL_7;
   sConfig.Rank = ADC_REGULAR_RANK_1;
-  /* A potentiometer can be a relatively high-impedance source. */
   sConfig.SamplingTime = ADC_SAMPLETIME_84CYCLES;
   if (HAL_ADC_ConfigChannel(&hadc3, &sConfig) != HAL_OK)
   {

@@ -43,9 +43,11 @@ void Acquisition_ReportFrameStatus(uint16_t sequence,
 
 uint8_t Acquisition_GetLatestFrame(uint16_t *ch1,
                                    uint16_t *ch2,
+                                   uint8_t *digital_samples,
                                    uint16_t sample_count,
                                    ProtocolScanMode *scan_mode,
                                    uint32_t *capture_tick);
+void Acquisition_TimerTick(void);
 
 ProtocolScanMode Acquisition_GetScanMode(void);
 uint8_t Acquisition_SetMode(ProtocolScanMode mode);

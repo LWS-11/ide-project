@@ -15,11 +15,14 @@ class ProtocolTests(unittest.TestCase):
     def test_dual_frame_round_trip(self):
         ch1 = [index * 6 for index in range(500)]
         ch2 = [3300 - index for index in range(500)]
-        raw = protocol.build_data_frame(ch1, ch2, protocol.SCAN_1MS, 65535)
-        self.assertEqual(len(raw), 2014)
+        digital = [index & 0x07 for index in range(500)]
+        raw = protocol.build_data_frame(
+            ch1, ch2, protocol.SCAN_1MS, 65535, digital
+        )
+        self.assertEqual(len(raw), 2514)
         self.assertEqual(
             raw[:12],
-            b"\xA5\x5A\x01\x30\xFF\xFF\xF4\x01\x14\x00\x03\x00",
+            b"\xA5\x5A\x01\x30\xFF\xFF\xF4\x01\x14\x00\x07\x00",
         )
 
         parsed = protocol.decode_data_frame(raw)
@@ -29,6 +32,7 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(parsed.scan_mode, protocol.SCAN_1MS)
         self.assertEqual(parsed.ch1_mv, tuple(ch1))
         self.assertEqual(parsed.ch2_mv, tuple(ch2))
+        self.assertEqual(parsed.digital, tuple(digital))
 
     def test_control_packet_round_trip(self):
         for mode, interval in enumerate(protocol.SCAN_INTERVALS_US):

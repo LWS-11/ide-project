@@ -52,7 +52,8 @@ static uint16_t ch1_samples[PROTOCOL_SAMPLES_PER_CHANNEL];
 static uint16_t ch2_samples[PROTOCOL_SAMPLES_PER_CHANNEL];
 static uint16_t ch1_mv[PROTOCOL_SAMPLES_PER_CHANNEL];
 static uint16_t ch2_mv[PROTOCOL_SAMPLES_PER_CHANNEL];
-static uint8_t tx_frame[PROTOCOL_DUAL_FRAME_SIZE];
+static uint8_t digital_samples[PROTOCOL_SAMPLES_PER_CHANNEL];
+static uint8_t tx_frame[PROTOCOL_FULL_FRAME_SIZE];
 static uint16_t tx_sequence;
 static uint16_t pot_filtered_mv;
 static uint32_t pot_filter_last_tick;
@@ -137,6 +138,7 @@ int main(void)
 
       if (Acquisition_GetLatestFrame(ch1_samples,
                                      ch2_samples,
+                                     digital_samples,
                                      PROTOCOL_SAMPLES_PER_CHANNEL,
                                      &scan_mode,
                                      &capture_tick))
@@ -216,14 +218,15 @@ int main(void)
         }
 
         uint16_t frame_length =
-            Protocol_BuildDualChannelFrame(ch1_mv,
-                                           ch2_mv,
-                                           PROTOCOL_SAMPLES_PER_CHANNEL,
-                                           Protocol_ScanIntervalUs(scan_mode),
-                                           tx_sequence,
-                                           tx_frame);
+            Protocol_BuildFullFrame(ch1_mv,
+                                    ch2_mv,
+                                    digital_samples,
+                                    PROTOCOL_SAMPLES_PER_CHANNEL,
+                                    Protocol_ScanIntervalUs(scan_mode),
+                                    tx_sequence,
+                                    tx_frame);
 
-        if (frame_length == PROTOCOL_DUAL_FRAME_SIZE)
+        if (frame_length == PROTOCOL_FULL_FRAME_SIZE)
         {
           if (Acquisition_TransmitFrame(tx_frame, frame_length))
           {
