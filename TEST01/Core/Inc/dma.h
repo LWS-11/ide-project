@@ -29,6 +29,7 @@ extern "C" {
 #include "main.h"
 
 /* DMA memory to memory transfer handles -------------------------------------*/
+extern DMA_HandleTypeDef hdma_uart7_rx;
 
 /* USER CODE BEGIN Includes */
 

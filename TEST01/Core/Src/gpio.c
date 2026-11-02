@@ -50,17 +50,17 @@ void MX_GPIO_Init(void)
   __HAL_RCC_GPIOI_CLK_ENABLE();
   __HAL_RCC_GPIOF_CLK_ENABLE();
 
-  /* Arduino D7/D8 -> D1/D2 */
-  GPIO_InitStruct.Pin = DIG_CH2_Pin|DIG_CH1_Pin;
+  /* Arduino D11/PB15 -> D1, D12/PB14 -> D2 */
+  GPIO_InitStruct.Pin = DIG_CH1_Pin | DIG_CH2_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
   GPIO_InitStruct.Pull = GPIO_PULLDOWN;
-  HAL_GPIO_Init(GPIOI, &GPIO_InitStruct);
+  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
-  /* Arduino D9 -> D3 */
+  /* Arduino D13/PI1 -> D3 */
   GPIO_InitStruct.Pin = DIG_CH3_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
   GPIO_InitStruct.Pull = GPIO_PULLDOWN;
-  HAL_GPIO_Init(DIG_CH3_GPIO_Port, &GPIO_InitStruct);
+  HAL_GPIO_Init(GPIOI, &GPIO_InitStruct);
 
 }
 

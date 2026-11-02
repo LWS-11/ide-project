@@ -155,6 +155,11 @@ int main(void)
         uint16_t ch2_raw_min = 0xFFFFU;
         uint16_t ch2_raw_max = 0U;
         uint32_t ch1_raw_sum = 0U;
+        uint16_t d1_high_count = 0U;
+        uint16_t d1_low_run = 0U;
+        uint16_t d1_high_run = 0U;
+        uint16_t d1_max_low_run = 0U;
+        uint16_t d1_max_high_run = 0U;
 
         for (uint16_t i = 0U; i < PROTOCOL_SAMPLES_PER_CHANNEL; ++i)
         {
@@ -177,6 +182,20 @@ int main(void)
           if (ch1_samples[i] > ch1_raw_max) ch1_raw_max = ch1_samples[i];
           if (ch2_samples[i] < ch2_raw_min) ch2_raw_min = ch2_samples[i];
           if (ch2_samples[i] > ch2_raw_max) ch2_raw_max = ch2_samples[i];
+
+          if ((digital_samples[i] & 0x01U) != 0U)
+          {
+            d1_high_count++;
+            d1_high_run++;
+            d1_low_run = 0U;
+            if (d1_high_run > d1_max_high_run) d1_max_high_run = d1_high_run;
+          }
+          else
+          {
+            d1_low_run++;
+            d1_high_run = 0U;
+            if (d1_low_run > d1_max_low_run) d1_max_low_run = d1_low_run;
+          }
         }
 
         /*
@@ -245,7 +264,10 @@ int main(void)
                 ch1_raw_min,
                 ch1_raw_max,
                 ch2_raw_min,
-                ch2_raw_max);
+                ch2_raw_max,
+                d1_high_count,
+                d1_max_low_run,
+                d1_max_high_run);
           }
           tx_sequence++;
         }

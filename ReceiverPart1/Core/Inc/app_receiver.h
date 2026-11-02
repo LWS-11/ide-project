@@ -30,8 +30,9 @@ extern "C" {
  *
  * 扩展数字帧的通道标志为 0x07。每个采样点占 5 字节：
  *   CH1 低字节、CH1 高字节、CH2 低字节、CH2 高字节、数字位图。
- *   数字位图 bit0/bit1/bit2 分别对应数字通道 D1/D2/D3：
- *   D1 = Arduino D7/PI3，D2 = Arduino D8/PI2，D3 = Arduino D9/PA15。
+ *   数字位图 bit0/bit1/bit2 分别对应逻辑通道 D1/D2/D3。
+ *   当前采集端物理输入映射：
+ *   D1 = Arduino D11/PB15，D2 = Arduino D12/PB14，D3 = Arduino D13/PI1。
  *
  * 任务通道含义：
  *   CH1 = 电位器，ADC3_IN7 / PF9 / Arduino A2；

@@ -982,6 +982,8 @@ static void select_timebase(uint8_t index)
   timebase_failed = false;
   timebase_retries_left = TOUCH_COMMAND_RETRIES - 1U;
   timebase_retry_at_ms = HAL_GetTick() + TOUCH_COMMAND_RETRY_MS;
+  /* A timebase change is an explicit request to resume updating the trace. */
+  waveform_paused = false;
   send_timebase_command(index);
   send_timebase_debug("TB REQ,IDX=", index, timebase_interval_us[index]);
   refresh_timebase_screen();

@@ -57,6 +57,7 @@
 
 /* External variables --------------------------------------------------------*/
 extern DMA_HandleTypeDef hdma_adc3;
+extern DMA_HandleTypeDef hdma_uart7_rx;
 extern TIM_HandleTypeDef htim8;
 extern UART_HandleTypeDef huart7;
 extern UART_HandleTypeDef huart1;
@@ -209,8 +210,23 @@ void USART1_IRQHandler(void)
 {
   /* USER CODE BEGIN USART1_IRQn 0 */
 
+  /*
+   * Drain every byte currently held by USART1.  Reading RDR clears RXNE and
+   * also completes the overrun-error clear sequence, so one interrupt can
+   * accept a complete "TB=n" command even at a low CPU clock.
+   */
+  while ((USART1->ISR & USART_ISR_RXNE) != 0U)
+  {
+    uint16_t received = (uint16_t)USART1->RDR;
+    Acquisition_Uart1IsrByte((uint8_t)received);
+  }
+  if ((USART1->ISR & (USART_ISR_ORE | USART_ISR_FE | USART_ISR_NE)) != 0U)
+  {
+    __HAL_UART_CLEAR_OREFLAG(&huart1);
+  }
+
   /* USER CODE END USART1_IRQn 0 */
-  HAL_UART_IRQHandler(&huart1);
+  /* USART1 reception is handled above; do not restart HAL one-byte RX here. */
   /* USER CODE BEGIN USART1_IRQn 1 */
 
   /* USER CODE END USART1_IRQn 1 */
@@ -242,6 +258,20 @@ void DMA2_Stream0_IRQHandler(void)
   /* USER CODE BEGIN DMA2_Stream0_IRQn 1 */
 
   /* USER CODE END DMA2_Stream0_IRQn 1 */
+}
+
+/**
+  * @brief This function handles DMA1 stream3 global interrupt.
+  */
+void DMA1_Stream3_IRQHandler(void)
+{
+  /* USER CODE BEGIN DMA1_Stream3_IRQn 0 */
+
+  /* USER CODE END DMA1_Stream3_IRQn 0 */
+  HAL_DMA_IRQHandler(&hdma_uart7_rx);
+  /* USER CODE BEGIN DMA1_Stream3_IRQn 1 */
+
+  /* USER CODE END DMA1_Stream3_IRQn 1 */
 }
 
 /**

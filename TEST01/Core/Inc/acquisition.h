@@ -39,7 +39,10 @@ void Acquisition_ReportFrameStatus(uint16_t sequence,
                                    uint16_t ch1_raw_min,
                                    uint16_t ch1_raw_max,
                                    uint16_t ch2_raw_min,
-                                   uint16_t ch2_raw_max);
+                                   uint16_t ch2_raw_max,
+                                   uint16_t d1_high_count,
+                                   uint16_t d1_max_low_run,
+                                   uint16_t d1_max_high_run);
 
 uint8_t Acquisition_GetLatestFrame(uint16_t *ch1,
                                    uint16_t *ch2,
@@ -52,6 +55,10 @@ void Acquisition_TimerTick(void);
 ProtocolScanMode Acquisition_GetScanMode(void);
 uint8_t Acquisition_SetMode(ProtocolScanMode mode);
 void Acquisition_GetStats(AcquisitionStats *stats);
+
+/* Called by the USART1 interrupt to queue a received PC byte without HAL
+ * restarting a one-byte receive transaction for every character. */
+void Acquisition_Uart1IsrByte(uint8_t byte);
 
 #ifdef __cplusplus
 }

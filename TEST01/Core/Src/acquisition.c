@@ -9,6 +9,8 @@
 
 #include "acquisition.h"
 
+#include <string.h>
+
 #include "adc.h"
 #include "tim.h"
 #include "usart.h"
@@ -39,7 +41,7 @@ typedef struct
 
 static uint16_t adc_dma_buffer[ADC_DMA_HALF_WORDS];
 static uint16_t ready_frames[2][ADC_FRAME_HALF_WORDS];
-static uint8_t digital_dma_buffer[ADC_FRAME_PAIRS * 2U];
+static uint8_t digital_capture[2][ADC_FRAME_PAIRS];
 static uint8_t ready_digital[2][ADC_FRAME_PAIRS];
 
 static volatile uint8_t ready_write_index;
@@ -50,7 +52,11 @@ static volatile uint8_t adc_error_latched;
 static volatile uint8_t acquisition_running;
 static volatile uint32_t uart1_rx_bytes;
 static volatile uint32_t uart7_rx_bytes;
-static volatile uint16_t digital_sample_index;
+static volatile uint16_t digital_write_index;
+static volatile uint8_t digital_write_half;
+static volatile uint8_t digital_completed_half;
+static volatile uint8_t digital_previous_value;
+static volatile uint32_t digital_edge_count[3];
 
 static UartRxRing uart1_rx;
 static UartRxRing uart7_rx;
@@ -140,19 +146,19 @@ static void Acquisition_FormatUint(char *output, uint32_t value)
 }
 
 static void Acquisition_AppendText(char *output,
-                                   uint8_t *position,
-                                   uint8_t capacity,
+                                   uint16_t *position,
+                                   uint16_t capacity,
                                    const char *text)
 {
-  while ((*text != '\0') && (*position < (uint8_t)(capacity - 1U)))
+  while ((*text != '\0') && (*position < (uint16_t)(capacity - 1U)))
   {
     output[(*position)++] = *text++;
   }
 }
 
 static void Acquisition_AppendUint(char *output,
-                                   uint8_t *position,
-                                   uint8_t capacity,
+                                   uint16_t *position,
+                                   uint16_t capacity,
                                    uint32_t value)
 {
   char number[11];
@@ -160,7 +166,7 @@ static void Acquisition_AppendUint(char *output,
 
   Acquisition_FormatUint(number, value);
   while ((number[index] != '\0') &&
-         (*position < (uint8_t)(capacity - 1U)))
+         (*position < (uint16_t)(capacity - 1U)))
   {
     output[(*position)++] = number[index++];
   }
@@ -170,7 +176,7 @@ static void Acquisition_DebugControl(ProtocolScanMode mode,
                                      uint16_t interval_us)
 {
   char line[48];
-  uint8_t position = 0U;
+  uint16_t position = 0U;
 
   Acquisition_AppendText(line, &position, sizeof(line), "RX CTRL,TB=");
   Acquisition_AppendUint(line, &position, sizeof(line), (uint32_t)mode);
@@ -202,7 +208,12 @@ static void Acquisition_ClearCapture(void)
   ready_write_index = 1U;
   ready_frame_available = 0U;
   capture_tick = 0U;
-  digital_sample_index = 0U;
+  memset(digital_capture, 0, sizeof(digital_capture));
+  memset(ready_digital, 0, sizeof(ready_digital));
+  digital_write_index = 0U;
+  digital_write_half = 0U;
+  digital_completed_half = 0U;
+  digital_previous_value = 0U;
 }
 
 static void Acquisition_Stop(void)
@@ -271,15 +282,6 @@ static void Acquisition_HandleCommand(ProtocolScanMode requested_mode)
   }
 }
 
-static void Acquisition_RearmUartReceive(UART_HandleTypeDef *huart,
-                                         UartRxRing *ring)
-{
-  if (HAL_UART_Receive_IT(huart, &ring->byte, 1U) != HAL_OK)
-  {
-    acquisition_stats.uart_errors++;
-  }
-}
-
 static void Acquisition_RearmUart7Dma(void)
 {
   if (HAL_UARTEx_ReceiveToIdle_DMA(&huart7, uart7_dma_rx,
@@ -298,6 +300,10 @@ uint8_t Acquisition_Init(void)
   uart1_rx_bytes = 0U;
   uart7_rx_bytes = 0U;
   adc_error_latched = 0U;
+  digital_previous_value = 0U;
+  digital_edge_count[0] = 0U;
+  digital_edge_count[1] = 0U;
+  digital_edge_count[2] = 0U;
   uart1_rx.head = 0U;
   uart1_rx.tail = 0U;
   uart7_rx.head = 0U;
@@ -320,7 +326,7 @@ uint8_t Acquisition_Init(void)
     uint8_t d3_started =
         (HAL_TIM_PWM_Start(&htim12, TIM_CHANNEL_1) == HAL_OK) ? 1U : 0U;
     char test_status[40];
-    uint8_t position = 0U;
+    uint16_t position = 0U;
 
     Acquisition_AppendText(test_status, &position, sizeof(test_status),
                            "TEST PWM START,D1=");
@@ -336,7 +342,14 @@ uint8_t Acquisition_Init(void)
     Acquisition_UartWriteRaw(&huart1, (const uint8_t *)test_status, position);
   }
 
-  Acquisition_RearmUartReceive(&huart1, &uart1_rx);
+  /*
+   * USART1 is consumed directly by its interrupt handler.  Draining every
+   * byte already present in RXNE avoids losing the remaining characters when
+   * a one-byte HAL_UART_Receive_IT transaction cannot be restarted quickly
+   * enough between two back-to-back characters.
+   */
+  __HAL_UART_CLEAR_OREFLAG(&huart1);
+  __HAL_UART_ENABLE_IT(&huart1, UART_IT_RXNE);
   Acquisition_RearmUart7Dma();
   Acquisition_UartWriteRaw(
       &huart1,
@@ -377,10 +390,13 @@ void Acquisition_ReportFrameStatus(uint16_t sequence,
                                    uint16_t ch1_raw_min,
                                    uint16_t ch1_raw_max,
                                    uint16_t ch2_raw_min,
-                                   uint16_t ch2_raw_max)
+                                   uint16_t ch2_raw_max,
+                                   uint16_t d1_high_count,
+                                   uint16_t d1_max_low_run,
+                                   uint16_t d1_max_high_run)
 {
-  char line[224];
-  uint8_t position = 0U;
+  char line[288];
+  uint16_t position = 0U;
 
   Acquisition_AppendText(line, &position, sizeof(line), "TX,SEQ=");
   Acquisition_AppendUint(line, &position, sizeof(line), sequence);
@@ -419,6 +435,18 @@ void Acquisition_ReportFrameStatus(uint16_t sequence,
   Acquisition_AppendUint(line, &position, sizeof(line), uart1_rx_bytes);
   Acquisition_AppendText(line, &position, sizeof(line), ",RX7=");
   Acquisition_AppendUint(line, &position, sizeof(line), uart7_rx_bytes);
+  Acquisition_AppendText(line, &position, sizeof(line), ",EDGE1=");
+  Acquisition_AppendUint(line, &position, sizeof(line), digital_edge_count[0]);
+  Acquisition_AppendText(line, &position, sizeof(line), ",EDGE2=");
+  Acquisition_AppendUint(line, &position, sizeof(line), digital_edge_count[1]);
+  Acquisition_AppendText(line, &position, sizeof(line), ",EDGE3=");
+  Acquisition_AppendUint(line, &position, sizeof(line), digital_edge_count[2]);
+  Acquisition_AppendText(line, &position, sizeof(line), ",D1H=");
+  Acquisition_AppendUint(line, &position, sizeof(line), d1_high_count);
+  Acquisition_AppendText(line, &position, sizeof(line), ",D1LMAX=");
+  Acquisition_AppendUint(line, &position, sizeof(line), d1_max_low_run);
+  Acquisition_AppendText(line, &position, sizeof(line), ",D1HMAX=");
+  Acquisition_AppendUint(line, &position, sizeof(line), d1_max_high_run);
   Acquisition_AppendText(line, &position, sizeof(line), "\r\n");
   Acquisition_UartWriteRaw(&huart1, (const uint8_t *)line, position);
 }
@@ -587,15 +615,31 @@ void Acquisition_TimerTick(void)
     return;
   }
 
-  /* D1=Arduino D7/PI3, D2=Arduino D8/PI2, D3=Arduino D9/PA15. */
+  /* D1=Arduino D11/PB15, D2=Arduino D12/PB14, D3=Arduino D13/PI1. */
   if ((DIG_CH1_GPIO_Port->IDR & DIG_CH1_Pin) != 0U) value |= 0x01U;
   if ((DIG_CH2_GPIO_Port->IDR & DIG_CH2_Pin) != 0U) value |= 0x02U;
   if ((DIG_CH3_GPIO_Port->IDR & DIG_CH3_Pin) != 0U) value |= 0x04U;
 
-  digital_dma_buffer[digital_sample_index++] = value;
-  if (digital_sample_index >= (ADC_FRAME_PAIRS * 2U))
   {
-    digital_sample_index = 0U;
+    uint8_t changed = (uint8_t)(value ^ digital_previous_value);
+
+    if ((changed & 0x01U) != 0U) digital_edge_count[0]++;
+    if ((changed & 0x02U) != 0U) digital_edge_count[1]++;
+    if ((changed & 0x04U) != 0U) digital_edge_count[2]++;
+    digital_previous_value = value;
+  }
+
+  digital_capture[digital_write_half][digital_write_index++] = value;
+  if (digital_write_index >= ADC_FRAME_PAIRS)
+  {
+    /*
+     * Seal the completed half before switching writers.  The ADC DMA
+     * callback only reads this sealed half, so a timer interrupt can never
+     * overwrite bytes while the callback is copying them.
+     */
+    digital_completed_half = digital_write_half;
+    digital_write_half ^= 1U;
+    digital_write_index = 0U;
   }
 }
 
@@ -603,7 +647,8 @@ void HAL_ADC_ConvHalfCpltCallback(ADC_HandleTypeDef *hadc)
 {
   if (hadc->Instance == ADC3)
   {
-    Acquisition_StoreDmaHalf(&adc_dma_buffer[0], &digital_dma_buffer[0]);
+    Acquisition_StoreDmaHalf(
+        &adc_dma_buffer[0], digital_capture[digital_completed_half]);
   }
 }
 
@@ -612,7 +657,7 @@ void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc)
   if (hadc->Instance == ADC3)
   {
     Acquisition_StoreDmaHalf(&adc_dma_buffer[ADC_FRAME_HALF_WORDS],
-                             &digital_dma_buffer[ADC_FRAME_PAIRS]);
+                             digital_capture[digital_completed_half]);
   }
 }
 
@@ -626,27 +671,20 @@ void HAL_ADC_ErrorCallback(ADC_HandleTypeDef *hadc)
   }
 }
 
-void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+void Acquisition_Uart1IsrByte(uint8_t byte)
 {
-  if (huart->Instance == USART1)
+  uint8_t next_head =
+      (uint8_t)((uart1_rx.head + 1U) & UART_RX_RING_MASK);
+
+  if (next_head != uart1_rx.tail)
   {
+    uart1_rx.buffer[uart1_rx.head] = byte;
+    uart1_rx.head = next_head;
     uart1_rx_bytes++;
-    {
-      uint8_t next_head =
-          (uint8_t)((uart1_rx.head + 1U) & UART_RX_RING_MASK);
-
-      if (next_head != uart1_rx.tail)
-      {
-        uart1_rx.buffer[uart1_rx.head] = uart1_rx.byte;
-        uart1_rx.head = next_head;
-      }
-      else
-      {
-        acquisition_stats.uart_dropped_bytes++;
-      }
-
-      Acquisition_RearmUartReceive(huart, &uart1_rx);
-    }
+  }
+  else
+  {
+    acquisition_stats.uart_dropped_bytes++;
   }
 }
 
@@ -677,8 +715,7 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
 {
   if (huart->Instance == USART1)
   {
-    acquisition_stats.uart_errors++;
-    Acquisition_RearmUartReceive(&huart1, &uart1_rx);
+    __HAL_UART_CLEAR_OREFLAG(&huart1);
   }
   else if (huart->Instance == UART7)
   {
