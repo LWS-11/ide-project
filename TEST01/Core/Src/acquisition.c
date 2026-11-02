@@ -234,60 +234,6 @@ static uint8_t Acquisition_Start(void)
   return 1U;
 }
 
-/*
- * Test-wave frequencies are scaled with the scan-time setting so that every
- * setting shows approximately 10, 5 and 25 periods across the full screen.
- *
- * TIM3/TIM5/TIM12 run from a 1 MHz counter after /16 prescaling.
- */
-static void Acquisition_ConfigureTestOutputs(ProtocolScanMode scan_mode)
-{
-  uint32_t d1_hz;
-  uint32_t d2_hz;
-  uint32_t d3_hz;
-  uint32_t d1_period;
-  uint32_t d2_period;
-  uint32_t d3_period;
-
-  switch (scan_mode)
-  {
-    case PROTOCOL_SCAN_5MS:
-      d1_hz = 200U;
-      d2_hz = 100U;
-      d3_hz = 500U;
-      break;
-
-    case PROTOCOL_SCAN_1MS:
-      d1_hz = 1000U;
-      d2_hz = 500U;
-      d3_hz = 2500U;
-      break;
-
-    case PROTOCOL_SCAN_10MS:
-    default:
-      d1_hz = 100U;
-      d2_hz = 50U;
-      d3_hz = 250U;
-      break;
-  }
-
-  /* Timer counter clock = 16 MHz / (15 + 1) = 1 MHz. */
-  __HAL_TIM_SET_PRESCALER(&htim3, 15U);
-  __HAL_TIM_SET_PRESCALER(&htim5, 15U);
-  __HAL_TIM_SET_PRESCALER(&htim12, 15U);
-
-  d1_period = (1000000UL / d1_hz) - 1U;
-  d2_period = (1000000UL / d2_hz) - 1U;
-  d3_period = (1000000UL / d3_hz) - 1U;
-
-  __HAL_TIM_SET_AUTORELOAD(&htim3, d1_period);
-  __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, (d1_period + 1U) / 2U);
-  __HAL_TIM_SET_AUTORELOAD(&htim5, d2_period);
-  __HAL_TIM_SET_COMPARE(&htim5, TIM_CHANNEL_4, (d2_period + 1U) / 2U);
-  __HAL_TIM_SET_AUTORELOAD(&htim12, d3_period);
-  __HAL_TIM_SET_COMPARE(&htim12, TIM_CHANNEL_1, (d3_period + 1U) / 2U);
-}
-
 static uint8_t Acquisition_ApplyMode(ProtocolScanMode scan_mode)
 {
   uint32_t period = Acquisition_TimerPeriod(scan_mode);
@@ -297,7 +243,6 @@ static uint8_t Acquisition_ApplyMode(ProtocolScanMode scan_mode)
   __HAL_TIM_SET_COUNTER(&htim8, 0U);
   htim8.Init.Period = period;
   current_scan_mode = scan_mode;
-  Acquisition_ConfigureTestOutputs(scan_mode);
 
   return Acquisition_Start();
 }
@@ -367,9 +312,29 @@ uint8_t Acquisition_Init(void)
     return 0U;
   }
 
-  (void)HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1);
-  (void)HAL_TIM_PWM_Start(&htim5, TIM_CHANNEL_4);
-  (void)HAL_TIM_PWM_Start(&htim12, TIM_CHANNEL_1);
+  {
+    uint8_t d1_started =
+        (HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1) == HAL_OK) ? 1U : 0U;
+    uint8_t d2_started =
+        (HAL_TIM_PWM_Start(&htim5, TIM_CHANNEL_4) == HAL_OK) ? 1U : 0U;
+    uint8_t d3_started =
+        (HAL_TIM_PWM_Start(&htim12, TIM_CHANNEL_1) == HAL_OK) ? 1U : 0U;
+    char test_status[40];
+    uint8_t position = 0U;
+
+    Acquisition_AppendText(test_status, &position, sizeof(test_status),
+                           "TEST PWM START,D1=");
+    Acquisition_AppendUint(test_status, &position, sizeof(test_status),
+                           d1_started);
+    Acquisition_AppendText(test_status, &position, sizeof(test_status), ",D2=");
+    Acquisition_AppendUint(test_status, &position, sizeof(test_status),
+                           d2_started);
+    Acquisition_AppendText(test_status, &position, sizeof(test_status), ",D3=");
+    Acquisition_AppendUint(test_status, &position, sizeof(test_status),
+                           d3_started);
+    Acquisition_AppendText(test_status, &position, sizeof(test_status), "\r\n");
+    Acquisition_UartWriteRaw(&huart1, (const uint8_t *)test_status, position);
+  }
 
   Acquisition_RearmUartReceive(&huart1, &uart1_rx);
   Acquisition_RearmUart7Dma();
