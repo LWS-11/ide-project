@@ -9,9 +9,10 @@
 #define BOARD_RX_RING_MASK (BOARD_RX_RING_SIZE - 1U)
 #define PC_RX_RING_SIZE 8192U
 #define PC_RX_RING_MASK (PC_RX_RING_SIZE - 1U)
+#define BOARD_UART_DMA_RX_SIZE 8192U
 
-static volatile uint8_t board_rx_byte;
 static volatile uint8_t pc_rx_byte;
+static uint8_t board_uart_dma_rx[BOARD_UART_DMA_RX_SIZE];
 static volatile uint8_t board_rx_ring[BOARD_RX_RING_SIZE];
 static volatile uint8_t pc_rx_ring[PC_RX_RING_SIZE];
 static volatile uint32_t board_rx_head;
@@ -20,6 +21,23 @@ static volatile uint32_t pc_rx_head;
 static volatile uint32_t pc_rx_tail;
 static volatile uint32_t board_drop_count;
 static volatile uint32_t pc_drop_count;
+
+static void board_link_store_dma(const uint8_t *data, uint16_t length)
+{
+  for (uint16_t index = 0U; index < length; ++index)
+  {
+    uint32_t next = (board_rx_tail + 1U) & BOARD_RX_RING_MASK;
+    if (next != board_rx_head)
+    {
+      board_rx_ring[board_rx_tail] = data[index];
+      board_rx_tail = next;
+    }
+    else
+    {
+      ++board_drop_count;
+    }
+  }
+}
 
 static void board_link_driver_enable(bool enable)
 {
@@ -89,7 +107,20 @@ void BoardLink_Init(void)
   gpio.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
   HAL_GPIO_Init(BOARD_LINK_RS485_DE_GPIO_Port, &gpio);
 #endif
+  if (HAL_UART_Receive_DMA(
+          &huart7, board_uart_dma_rx, BOARD_UART_DMA_RX_SIZE) != HAL_OK)
+  {
+    ++board_drop_count;
+  }
   BoardLink_Service();
+}
+
+void HAL_UART_RxHalfCpltCallback(UART_HandleTypeDef *huart)
+{
+  if ((huart != NULL) && (huart->Instance == UART7))
+  {
+    board_link_store_dma(board_uart_dma_rx, BOARD_UART_DMA_RX_SIZE / 2U);
+  }
 }
 
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
@@ -101,17 +132,9 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 
   if (huart->Instance == UART7)
   {
-    uint32_t next = (board_rx_tail + 1U) & BOARD_RX_RING_MASK;
-    if (next != board_rx_head)
-    {
-      board_rx_ring[board_rx_tail] = board_rx_byte;
-      board_rx_tail = next;
-    }
-    else
-    {
-      ++board_drop_count;
-    }
-    (void)HAL_UART_Receive_IT(&huart7, (uint8_t *)&board_rx_byte, 1U);
+    board_link_store_dma(
+        &board_uart_dma_rx[BOARD_UART_DMA_RX_SIZE / 2U],
+        BOARD_UART_DMA_RX_SIZE / 2U);
   }
   else if (huart->Instance == USART1)
   {
@@ -135,6 +158,12 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
       ((huart->Instance == UART7) || (huart->Instance == USART1)))
   {
     __HAL_UART_CLEAR_OREFLAG(huart);
+    if (huart->Instance == UART7)
+    {
+      (void)HAL_UART_AbortReceive(&huart7);
+      (void)HAL_UART_Receive_DMA(
+          &huart7, board_uart_dma_rx, BOARD_UART_DMA_RX_SIZE);
+    }
   }
 }
 
@@ -161,7 +190,6 @@ static void service_one_uart(UART_HandleTypeDef *uart,
 
 void BoardLink_Service(void)
 {
-  service_one_uart(&huart7, &board_rx_byte);
   service_one_uart(&huart1, &pc_rx_byte);
 }
 

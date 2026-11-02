@@ -40,6 +40,7 @@
 /* 两个 SDRAM 帧缓冲区：显示一帧时，CPU 绘制另一帧，避免屏幕撕裂。 */
 #define LCD_FB0_ADDRESS 0xC0000000UL
 #define LCD_FB1_ADDRESS (LCD_FB0_ADDRESS + LCD_FRAME_STRIDE)
+#define LCD_BACKGROUND_ADDRESS (LCD_FB1_ADDRESS + LCD_FRAME_STRIDE)
 
 #define PLOT_LEFT 42
 #define PLOT_RIGHT 474
@@ -63,7 +64,7 @@
 #define FRAME_FLAG_CH1_CH2 (FRAME_FLAG_CH1 | FRAME_FLAG_CH2)
 #define FRAME_FLAG_ALL (FRAME_FLAG_CH1_CH2 | FRAME_FLAG_DIGITAL)
 
-#define RX_BYTES_PER_LOOP 1024U
+#define RX_BYTES_PER_LOOP 4096U
 #define BUTTON_DEBOUNCE_MS 35U
 #define TOUCH_DEBOUNCE_MS 120U
 #define TOUCH_COMMAND_RETRY_MS 150U
@@ -92,6 +93,7 @@
 
 #define DIGITAL_CHANNEL_COUNT 3U
 #define DIGITAL_LANE_HEIGHT 18
+#define DIGITAL_SCROLL_STEP 2U
 
 /* ============================ 3. 运行状态 ============================ */
 /* 两个帧缓冲区都位于外部 SDRAM，元素类型是 RGB565 的 16 位颜色。 */
@@ -99,6 +101,8 @@ static uint16_t *const framebuffers[2] = {
     (uint16_t *)LCD_FB0_ADDRESS,
     (uint16_t *)LCD_FB1_ADDRESS,
 };
+static uint16_t *const background_framebuffer =
+    (uint16_t *)LCD_BACKGROUND_ADDRESS;
 
 /*
  * 保存当前正在拼接的一帧。
@@ -125,6 +129,7 @@ static uint16_t sample_count_ch2;
 static uint16_t sample_count_digital;
 static uint16_t sample_interval_us;
 static uint16_t frame_sequence;
+static uint16_t digital_display_offset;
 static volatile bool frame_ready;
 
 /* 调试和运行统计变量：接收成功数、CRC 错误数、缓冲区溢出数。 */
@@ -622,7 +627,13 @@ static void draw_digital_waveform(uint16_t *framebuffer, uint8_t bit_mask,
 
     for (uint16_t index = first; index < last; ++index)
     {
-      if ((samples_digital[index] & bit_mask) != 0U)
+      uint16_t source_index =
+          (uint16_t)(index + digital_display_offset);
+      if (source_index >= sample_count_digital)
+      {
+        source_index = (uint16_t)(source_index - sample_count_digital);
+      }
+      if ((samples_digital[source_index] & bit_mask) != 0U)
       {
         any_high = true;
       }
@@ -746,7 +757,10 @@ static void render_waiting_screen(void)
 {
   uint16_t *framebuffer = framebuffers[active_framebuffer];
 
-  draw_grid(framebuffer);
+  memcpy(framebuffer, background_framebuffer,
+         LCD_FRAME_PIXELS * sizeof(uint16_t));
+  draw_timebase_buttons(framebuffer);
+  draw_channel_buttons(framebuffer);
   draw_channel_reading(framebuffer, 50, CHANNEL_LABEL_CH1,
                        COLOR_CH1, NULL, 0U);
   draw_channel_reading(framebuffer, 168, CHANNEL_LABEL_CH2,
@@ -766,7 +780,10 @@ static void render_received_frame(void)
   /* 当前前台缓冲区保持显示，新的完整帧画到后台缓冲区。 */
   uint16_t *framebuffer = framebuffers[active_framebuffer ^ 1U];
 
-  draw_grid(framebuffer);
+  memcpy(framebuffer, background_framebuffer,
+         LCD_FRAME_PIXELS * sizeof(uint16_t));
+  draw_timebase_buttons(framebuffer);
+  draw_channel_buttons(framebuffer);
   if (channel_visible[0])
   {
     draw_waveform(framebuffer, samples_ch1, sample_count_ch1, COLOR_CH1);
@@ -774,6 +791,16 @@ static void render_received_frame(void)
   if (channel_visible[1])
   {
     draw_waveform(framebuffer, samples_ch2, sample_count_ch2, COLOR_CH2);
+  }
+  if (sample_count_digital > 0U)
+  {
+    digital_display_offset =
+        (uint16_t)(digital_display_offset + DIGITAL_SCROLL_STEP);
+    if (digital_display_offset >= sample_count_digital)
+    {
+      digital_display_offset =
+          (uint16_t)(digital_display_offset - sample_count_digital);
+    }
   }
   draw_digital_waveform(framebuffer, 0x01U, 0U);
   draw_digital_waveform(framebuffer, 0x02U, 1U);
@@ -1297,6 +1324,41 @@ static bool validate_and_store_frame(BoardLinkSource source)
 static void parser_push(uint8_t byte, BoardLinkSource source)
 {
   /*
+   * PC text commands use their own path and never enter the binary frame
+   * reassembly buffer, even while a board frame is partially received.
+   */
+  if (source == BOARD_LINK_SOURCE_PC)
+  {
+    if ((byte == '\r') || (byte == '\n'))
+    {
+      if (pc_command_length > 0U)
+      {
+        pc_command_buffer[pc_command_length] = '\0';
+        if ((pc_command_length == 4U) &&
+            (pc_command_buffer[0] == 'T') &&
+            (pc_command_buffer[1] == 'B') &&
+            (pc_command_buffer[2] == '=') &&
+            (pc_command_buffer[3] >= '0') &&
+            (pc_command_buffer[3] <= '2'))
+        {
+          select_timebase((uint8_t)(pc_command_buffer[3] - '0'));
+        }
+        pc_command_length = 0U;
+      }
+    }
+    else if ((byte >= 0x20U) && (byte <= 0x7EU) &&
+             (pc_command_length < PC_COMMAND_MAX_LENGTH))
+    {
+      pc_command_buffer[pc_command_length++] = (char)byte;
+    }
+    else
+    {
+      pc_command_length = 0U;
+    }
+    return;
+  }
+
+  /*
    * 文本调试命令与二进制数据帧共用同一串口。TB=0/1/2 会走与触摸按钮
    * 完全相同的换档函数，便于 PC 上位机自动化验证控制包收发。
    */
@@ -1502,6 +1564,7 @@ void App_ReceiverInit(void)
   timebase_failed_at_ms = 0U;
   timebase_user_selected = false;
   waveform_paused = false;
+  digital_display_offset = 0U;
   for (uint8_t index = 0U; index < CHANNEL_BUTTON_COUNT; ++index)
   {
     channel_visible[index] = true;
@@ -1512,6 +1575,9 @@ void App_ReceiverInit(void)
   button_raw_pressed =
       HAL_GPIO_ReadPin(KEY_USER_GPIO_Port, KEY_USER_Pin) == GPIO_PIN_SET;
   button_last_change_ms = HAL_GetTick();
+  draw_grid(framebuffers[0]);
+  memcpy(background_framebuffer, framebuffers[0],
+         LCD_FRAME_PIXELS * sizeof(uint16_t));
   present_frame(framebuffers[0]);
   render_waiting_screen();
 
@@ -1548,17 +1614,18 @@ void App_ReceiverLoop(void)
   uint16_t processed = 0U;
   uint8_t value;
 
-  while ((processed < RX_BYTES_PER_LOOP) &&
-         BoardLink_ReadBoardByte(&value))
-  {
-    parser_push(value, BOARD_LINK_SOURCE_BOARD);
-    ++processed;
-  }
-
+  /* PC commands must not be starved by the continuous board-data stream. */
   while ((processed < RX_BYTES_PER_LOOP) &&
          BoardLink_ReadPcByte(&value))
   {
     parser_push(value, BOARD_LINK_SOURCE_PC);
+    ++processed;
+  }
+
+  while ((processed < RX_BYTES_PER_LOOP) &&
+         BoardLink_ReadBoardByte(&value))
+  {
+    parser_push(value, BOARD_LINK_SOURCE_BOARD);
     ++processed;
   }
 

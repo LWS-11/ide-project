@@ -57,6 +57,7 @@
 /* External variables --------------------------------------------------------*/
 extern UART_HandleTypeDef huart1;
 extern UART_HandleTypeDef huart7;
+extern DMA_HandleTypeDef hdma_uart7_rx;
 /* USER CODE BEGIN EV */
 
 /* USER CODE END EV */
@@ -219,6 +220,14 @@ void USART1_IRQHandler(void)
 void UART7_IRQHandler(void)
 {
   HAL_UART_IRQHandler(&huart7);
+}
+
+/**
+  * @brief This function handles DMA1 stream3 global interrupt.
+  */
+void DMA1_Stream3_IRQHandler(void)
+{
+  HAL_DMA_IRQHandler(&hdma_uart7_rx);
 }
 
 /* USER CODE BEGIN 1 */

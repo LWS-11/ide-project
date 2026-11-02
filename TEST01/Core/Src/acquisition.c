@@ -19,7 +19,8 @@
 #define ADC_FRAME_HALF_WORDS            (ADC_FRAME_PAIRS * 2U)
 #define ADC_DMA_HALF_WORDS              (ADC_FRAME_HALF_WORDS * 2U)
 
-#define TIMER_CLOCK_HZ                  16000000UL
+#define TIM8_PRESCALER                  215U
+#define TIMER_CLOCK_HZ                  1000000UL
 #define TIMER_ARR_SCAN_10MS             ((TIMER_CLOCK_HZ / 5000UL) - 1UL)
 #define TIMER_ARR_SCAN_5MS              ((TIMER_CLOCK_HZ / 10000UL) - 1UL)
 #define TIMER_ARR_SCAN_1MS              ((TIMER_CLOCK_HZ / 50000UL) - 1UL)
@@ -249,7 +250,7 @@ static uint8_t Acquisition_ApplyMode(ProtocolScanMode scan_mode)
 {
   uint32_t period = Acquisition_TimerPeriod(scan_mode);
 
-  __HAL_TIM_SET_PRESCALER(&htim8, 0U);
+  __HAL_TIM_SET_PRESCALER(&htim8, TIM8_PRESCALER);
   __HAL_TIM_SET_AUTORELOAD(&htim8, period);
   __HAL_TIM_SET_COUNTER(&htim8, 0U);
   htim8.Init.Period = period;
