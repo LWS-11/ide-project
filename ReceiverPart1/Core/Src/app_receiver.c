@@ -152,6 +152,7 @@ static uint8_t timebase_retries_left;
 static uint32_t timebase_retry_at_ms;
 static bool timebase_failed;
 static uint32_t timebase_failed_at_ms;
+static bool timebase_user_selected;
 
 typedef enum
 {
@@ -719,13 +720,13 @@ static void draw_status(uint16_t *framebuffer, RxVisualState status,
     strcat(rate_text, "US");
   }
   draw_text(framebuffer, 166, 248, rate_text,
-            timebase_pending ? COLOR_WARN : COLOR_MUTED, 1);
+            timebase_pending ? COLOR_WARN :
+            (timebase_failed ? COLOR_ERROR : COLOR_MUTED), 1);
   if (waveform_paused)
   {
     draw_text(framebuffer, 306, 248, "PAUSED", COLOR_WARN, 1);
   }
-  else if (timebase_failed &&
-      ((HAL_GetTick() - timebase_failed_at_ms) < 3000U))
+  else if (timebase_failed)
   {
     draw_text(framebuffer, 306, 248, "TB FAIL", COLOR_ERROR, 1);
   }
@@ -921,16 +922,19 @@ static void send_timebase_command(uint8_t index)
   packet[7] = (uint8_t)(crc & 0xFFU);
   packet[8] = (uint8_t)(crc >> 8);
 
+  /*
+   * Send two forms on the board link:
+   *   1. Short ASCII form for easy recovery from a lost byte.
+   *   2. CRC-protected binary form as the primary protocol.
+   * The acquisition parser accepts both. Sending ASCII first also prevents
+   * printable CRC bytes from polluting the ASCII command accumulator.
+   */
   {
-    /*
-     * Use the short line-oriented form on UART7. It is tolerant of a lost
-     * byte between retries, unlike a control packet whose CRC covers all 9
-     * bytes. The full binary packet is still mirrored to the PC for logging.
-     */
     char fallback[6] = {'T', 'B', '=', (char)('0' + index), '\r', '\n'};
     BoardLink_WriteBoard((const uint8_t *)fallback, sizeof(fallback));
   }
-  /* ACK/control mirrors let the PC observe board-to-board traffic. */
+  BoardLink_WriteBoard(packet, sizeof(packet));
+  /* Mirror the control packet to the PC for diagnostic logging. */
   BoardLink_WritePc(packet, sizeof(packet));
 }
 
@@ -974,6 +978,7 @@ static void select_timebase(uint8_t index)
   timebase_index = index;
   timebase_pending_index = index;
   timebase_pending = true;
+  timebase_user_selected = true;
   timebase_failed = false;
   timebase_retries_left = TOUCH_COMMAND_RETRIES - 1U;
   timebase_retry_at_ms = HAL_GetTick() + TOUCH_COMMAND_RETRY_MS;
@@ -988,6 +993,12 @@ static void poll_timebase_commands(void)
 
   if (!timebase_pending)
   {
+    if (timebase_user_selected && timebase_failed &&
+        ((int32_t)(HAL_GetTick() - timebase_retry_at_ms) >= 0))
+    {
+      send_timebase_command(timebase_pending_index);
+      timebase_retry_at_ms = HAL_GetTick() + 1000U;
+    }
     return;
   }
 
@@ -999,6 +1010,7 @@ static void poll_timebase_commands(void)
       timebase_pending = false;
       timebase_failed = true;
       timebase_failed_at_ms = now;
+      timebase_retry_at_ms = now + 1000U;
       send_timebase_debug("TB FAIL,IDX=", timebase_pending_index,
                           timebase_interval_us[timebase_pending_index]);
       refresh_timebase_screen();
@@ -1236,14 +1248,24 @@ static bool validate_and_store_frame(BoardLinkSource source)
    * 等待采集端确认新档位期间，保留用户刚选择的界面状态，避免旧数据帧
    * 把按钮立即“跳回”原档位。收到目标采样间隔后结束等待。
    */
-  if (timebase_pending)
+  if (timebase_user_selected)
   {
     if (interval == timebase_interval_us[timebase_pending_index])
     {
       timebase_index = timebase_pending_index;
       timebase_pending = false;
       timebase_failed = false;
+      timebase_user_selected = false;
       send_timebase_debug("TB OK,IDX=", timebase_index, interval);
+    }
+    else if (!timebase_pending)
+    {
+      /*
+       * Keep the user's selected button locked while the acquisition board
+       * is still sending the old interval. Otherwise every old frame makes
+       * the button jump back to 10MS before the switch is confirmed.
+       */
+      timebase_failed = true;
     }
   }
   else if (interval <= 30U)
@@ -1476,6 +1498,7 @@ void App_ReceiverInit(void)
   timebase_retries_left = 0U;
   timebase_failed = false;
   timebase_failed_at_ms = 0U;
+  timebase_user_selected = false;
   waveform_paused = false;
   for (uint8_t index = 0U; index < CHANNEL_BUTTON_COUNT; ++index)
   {
