@@ -437,7 +437,9 @@ void Acquisition_ReportFrameStatus(uint16_t sequence,
                                    uint16_t ch2_raw_max,
                                    uint16_t d1_high_count,
                                    uint16_t d1_max_low_run,
-                                   uint16_t d1_max_high_run)
+                                   uint16_t d1_max_high_run,
+                                   uint16_t d2_high_count,
+                                   uint16_t d3_high_count)
 {
   char line[288];
   uint16_t position = 0U;
@@ -493,6 +495,10 @@ void Acquisition_ReportFrameStatus(uint16_t sequence,
   Acquisition_AppendUint(line, &position, sizeof(line), d1_max_high_run);
   Acquisition_AppendText(line, &position, sizeof(line), ",GEN=");
   Acquisition_AppendUint(line, &position, sizeof(line), generator_frequency_hz);
+  Acquisition_AppendText(line, &position, sizeof(line), ",D2H=");
+  Acquisition_AppendUint(line, &position, sizeof(line), d2_high_count);
+  Acquisition_AppendText(line, &position, sizeof(line), ",D3H=");
+  Acquisition_AppendUint(line, &position, sizeof(line), d3_high_count);
   Acquisition_AppendText(line, &position, sizeof(line), "\r\n");
   Acquisition_UartWriteRaw(&huart1, (const uint8_t *)line, position);
 }

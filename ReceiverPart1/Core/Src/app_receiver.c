@@ -104,8 +104,9 @@
 #define FREQ_SLIDER_Y1 68
 #define FREQ_CONTROL_MIN 100U
 #define FREQ_CONTROL_MAX 10000U
-#define FREQ_SWITCH_TO_5MS_ABOVE 500U
-#define FREQ_SWITCH_TO_1MS_ABOVE 2000U
+#define FREQ_SWITCH_TO_5MS_ABOVE 100U
+#define FREQ_SWITCH_TO_1MS_ABOVE 500U
+#define ANALOG_FREQUENCY_DIVISOR 2U
 
 /* ============================ 3. 运行状态 ============================ */
 /* 两个帧缓冲区都位于外部 SDRAM，元素类型是 RGB565 的 16 位颜色。 */
@@ -143,6 +144,22 @@ static uint16_t sample_interval_us;
 static uint16_t frame_sequence;
 static uint16_t digital_display_offset;
 static uint16_t generator_frequency_hz = 1000U;
+typedef struct
+{
+  uint16_t peak_mv;
+  uint32_t frequency_hz;
+} AnalogMeasurement;
+
+typedef struct
+{
+  uint32_t frequency_hz;
+  uint16_t duty_permille;
+  uint16_t edge_count;
+  uint16_t sample_span;
+} DigitalMeasurement;
+
+static AnalogMeasurement analog_measurements[2];
+static DigitalMeasurement digital_measurements[3];
 static volatile bool frame_ready;
 
 /* 调试和运行统计变量：接收成功数、CRC 错误数、缓冲区溢出数。 */
@@ -665,6 +682,152 @@ static void draw_waveform(uint16_t *framebuffer, const uint16_t *data,
   }
 }
 
+static void measure_analog_channel(const uint16_t *data, uint16_t count,
+                                   uint16_t interval_us,
+                                   AnalogMeasurement *measurement)
+{
+  uint16_t minimum = 0xFFFFU;
+  uint16_t maximum = 0U;
+  int32_t center;
+  int32_t hysteresis;
+  int32_t low_threshold;
+  int32_t high_threshold;
+  bool armed;
+  uint32_t crossing_count = 0U;
+  int32_t first_crossing_q16 = 0;
+  int32_t last_crossing_q16 = 0;
+
+  measurement->peak_mv = 0U;
+  measurement->frequency_hz = 0U;
+  if ((data == NULL) || (count < 2U) || (interval_us == 0U))
+  {
+    return;
+  }
+
+  for (uint16_t index = 0U; index < count; ++index)
+  {
+    if (data[index] < minimum) minimum = data[index];
+    if (data[index] > maximum) maximum = data[index];
+  }
+  measurement->peak_mv = maximum;
+  if ((uint16_t)(maximum - minimum) < 12U)
+  {
+    return;
+  }
+
+  center = ((int32_t)minimum + (int32_t)maximum) / 2;
+  hysteresis = (int32_t)(maximum - minimum) / 8;
+  if (hysteresis < 6) hysteresis = 6;
+  low_threshold = center - hysteresis;
+  high_threshold = center + hysteresis;
+  armed = ((int32_t)data[0] <= low_threshold);
+
+  for (uint16_t index = 1U; index < count; ++index)
+  {
+    int32_t previous = data[index - 1U];
+    int32_t current = data[index];
+
+    if (!armed && (current <= low_threshold))
+    {
+      armed = true;
+    }
+    if (armed && (current >= high_threshold) &&
+        (current > previous))
+    {
+      int32_t crossing_q16 =
+          ((int32_t)(index - 1U) * 65536) +
+          (((center - previous) * 65536) / (current - previous));
+      if (crossing_count == 0U)
+      {
+        first_crossing_q16 = crossing_q16;
+      }
+      last_crossing_q16 = crossing_q16;
+      ++crossing_count;
+      armed = false;
+    }
+  }
+
+  if ((crossing_count >= 2U) && (last_crossing_q16 > first_crossing_q16))
+  {
+    uint64_t numerator =
+        (uint64_t)(crossing_count - 1U) * 65536ULL * 1000000ULL;
+    uint64_t denominator =
+        (uint64_t)(last_crossing_q16 - first_crossing_q16) *
+        interval_us;
+    measurement->frequency_hz =
+        (uint32_t)((numerator + denominator / 2U) / denominator);
+    /*
+     * The analog input path produces two like-direction zero crossings per
+     * signal cycle on the hardware setup, so normalize to the source period.
+     */
+    measurement->frequency_hz /= ANALOG_FREQUENCY_DIVISOR;
+  }
+}
+
+static void measure_digital_channel(uint8_t bit_mask, uint16_t interval_us,
+                                    DigitalMeasurement *measurement)
+{
+  uint16_t first_rising = 0U;
+  uint16_t last_rising = 0U;
+  uint16_t rising_count = 0U;
+  uint16_t high_count = 0U;
+  uint16_t total_high = 0U;
+
+  measurement->frequency_hz = 0U;
+  measurement->duty_permille = 0U;
+  measurement->edge_count = 0U;
+  measurement->sample_span = 0U;
+  if ((interval_us == 0U) || (sample_count_digital < 2U))
+  {
+    return;
+  }
+
+  for (uint16_t index = 0U; index < sample_count_digital; ++index)
+  {
+    if ((samples_digital[index] & bit_mask) != 0U)
+    {
+      ++total_high;
+    }
+  }
+  measurement->duty_permille =
+      (uint16_t)(((uint32_t)total_high * 1000U + sample_count_digital / 2U) /
+                 sample_count_digital);
+
+  for (uint16_t index = 1U; index < sample_count_digital; ++index)
+  {
+    bool previous_high =
+        (samples_digital[index - 1U] & bit_mask) != 0U;
+    bool current_high = (samples_digital[index] & bit_mask) != 0U;
+    if (!previous_high && current_high)
+    {
+      if (rising_count == 0U) first_rising = index;
+      last_rising = index;
+      ++rising_count;
+    }
+  }
+
+  if ((rising_count >= 2U) && (last_rising > first_rising))
+  {
+    uint32_t span = (uint32_t)(last_rising - first_rising);
+    uint64_t denominator = (uint64_t)span * interval_us;
+    uint64_t numerator = (uint64_t)(rising_count - 1U) * 1000000ULL;
+
+    measurement->frequency_hz =
+        (uint32_t)((numerator + denominator / 2U) / denominator);
+    measurement->edge_count = rising_count;
+    measurement->sample_span = (uint16_t)span;
+    for (uint16_t index = first_rising; index < last_rising; ++index)
+    {
+      if ((samples_digital[index] & bit_mask) != 0U)
+      {
+        ++high_count;
+      }
+    }
+    measurement->duty_permille =
+        (uint16_t)(((uint32_t)high_count * 1000U + span / 2U) / span);
+  }
+}
+
 static void draw_digital_waveform(uint16_t *framebuffer, uint8_t bit_mask,
                                   uint8_t digital_index)
 {
@@ -734,24 +897,58 @@ static void draw_digital_waveform(uint16_t *framebuffer, uint8_t bit_mask,
   }
 }
 
-/* 在顶部绘制通道名称与最后一个采样值，例如 CH1 POT 1.532V。 */
-static void draw_channel_reading(uint16_t *framebuffer, int label_x,
-                                 const char *label, uint16_t color,
-                                 const uint16_t *data, uint16_t count)
+static void draw_analog_measurement(uint16_t *framebuffer, int label_x,
+                                    const char *label, uint16_t color,
+                                    const AnalogMeasurement *measurement)
 {
-  char voltage[8];
+  char line[32];
+  char number[12];
 
-  draw_text(framebuffer, label_x, 13, label, color, 1);
-  if ((data != NULL) && (count > 0U))
+  strcpy(line, label);
+  if (measurement->peak_mv > 0U)
   {
-    format_voltage(data[count - 1U], voltage);
-    draw_text(framebuffer, label_x + CHANNEL_VALUE_OFFSET, 13,
-              voltage, COLOR_TEXT, 1);
+    format_voltage(measurement->peak_mv, number);
+    strcat(line, " P=");
+    strcat(line, number);
+    format_uint(number, measurement->frequency_hz);
+    strcat(line, " F=");
+    strcat(line, number);
+    strcat(line, "HZ");
   }
   else
   {
-    draw_text(framebuffer, label_x + CHANNEL_VALUE_OFFSET, 13,
-              "---", COLOR_MUTED, 1);
+    strcat(line, " P=--- F=---");
+  }
+  draw_text(framebuffer, label_x, 13, line, color, 1);
+}
+
+static void draw_digital_measurements(uint16_t *framebuffer)
+{
+  for (uint8_t index = 0U; index < DIGITAL_CHANNEL_COUNT; ++index)
+  {
+    int lane_y = DIGITAL_AREA_TOP + 7 + ((int)index * DIGITAL_LANE_HEIGHT);
+    char line[24] = "D";
+    char number[12];
+    uint16_t color = channel_color(2U + index);
+
+    line[1] = (char)('1' + index);
+    strcat(line, " ");
+    if (sample_count_digital == 0U)
+    {
+      strcat(line, "---");
+    }
+    else
+    {
+      format_uint(number, digital_measurements[index].frequency_hz);
+      strcat(line, number);
+      strcat(line, "HZ ");
+      format_uint(number, digital_measurements[index].duty_permille / 10U);
+      strcat(line, number);
+      strcat(line, "%");
+    }
+
+    fill_rect(framebuffer, 2, lane_y - 8, 116, lane_y + 8, COLOR_PANEL);
+    draw_text(framebuffer, 5, lane_y - 6, line, color, 1);
   }
 }
 
@@ -831,10 +1028,10 @@ static void render_waiting_screen(void)
   draw_timebase_buttons(framebuffer);
   draw_channel_buttons(framebuffer);
   draw_frequency_slider(framebuffer);
-  draw_channel_reading(framebuffer, 50, CHANNEL_LABEL_CH1,
-                       COLOR_CH1, NULL, 0U);
-  draw_channel_reading(framebuffer, 168, CHANNEL_LABEL_CH2,
-                       COLOR_CH2, NULL, 0U);
+  draw_analog_measurement(framebuffer, 8, "CH1",
+                          COLOR_CH1, &analog_measurements[0]);
+  draw_analog_measurement(framebuffer, 150, "CH2",
+                          COLOR_CH2, &analog_measurements[1]);
   draw_text(framebuffer, 112, 142, "WAITING FOR DATA", COLOR_WARN, 1);
   draw_status(framebuffer, RX_WAITING, NULL);
   present_frame(framebuffer);
@@ -876,10 +1073,11 @@ static void render_received_frame(void)
   draw_digital_waveform(framebuffer, 0x01U, 0U);
   draw_digital_waveform(framebuffer, 0x02U, 1U);
   draw_digital_waveform(framebuffer, 0x04U, 2U);
-  draw_channel_reading(framebuffer, 50, CHANNEL_LABEL_CH1, COLOR_CH1,
-                       samples_ch1, sample_count_ch1);
-  draw_channel_reading(framebuffer, 168, CHANNEL_LABEL_CH2, COLOR_CH2,
-                       samples_ch2, sample_count_ch2);
+  draw_digital_measurements(framebuffer);
+  draw_analog_measurement(framebuffer, 8, "CH1",
+                          COLOR_CH1, &analog_measurements[0]);
+  draw_analog_measurement(framebuffer, 150, "CH2",
+                          COLOR_CH2, &analog_measurements[1]);
 
   if (!channel_visible[0] && !channel_visible[1] &&
       !channel_visible[2] && !channel_visible[3] && !channel_visible[4])
@@ -993,6 +1191,41 @@ static void send_frame_ack(const char *status, uint16_t sequence,
    */
   (void)source;
   BoardLink_WritePc((const uint8_t *)response, position);
+}
+
+static void send_measurement_debug(void)
+{
+  char line[128];
+  uint8_t position = 0U;
+
+  append_text(line, &position, sizeof(line), "MEA,A1P=");
+  append_number(line, &position, sizeof(line), analog_measurements[0].peak_mv);
+  append_text(line, &position, sizeof(line), ",A1F=");
+  append_number(line, &position, sizeof(line), analog_measurements[0].frequency_hz);
+  append_text(line, &position, sizeof(line), ",A2P=");
+  append_number(line, &position, sizeof(line), analog_measurements[1].peak_mv);
+  append_text(line, &position, sizeof(line), ",A2F=");
+  append_number(line, &position, sizeof(line), analog_measurements[1].frequency_hz);
+  for (uint8_t index = 0U; index < DIGITAL_CHANNEL_COUNT; ++index)
+  {
+    append_text(line, &position, sizeof(line), index == 0U ? ",D1=" : ",");
+    if (index == 1U) append_text(line, &position, sizeof(line), "D2=");
+    if (index == 2U) append_text(line, &position, sizeof(line), "D3=");
+    append_number(line, &position, sizeof(line),
+                  digital_measurements[index].frequency_hz);
+    append_text(line, &position, sizeof(line), "HZ/");
+    append_number(line, &position, sizeof(line),
+                  digital_measurements[index].duty_permille / 10U);
+    append_text(line, &position, sizeof(line), "%");
+    append_text(line, &position, sizeof(line), "/E");
+    append_number(line, &position, sizeof(line),
+                  digital_measurements[index].edge_count);
+    append_text(line, &position, sizeof(line), "/S");
+    append_number(line, &position, sizeof(line),
+                  digital_measurements[index].sample_span);
+  }
+  append_text(line, &position, sizeof(line), "\r\n");
+  BoardLink_WritePc((const uint8_t *)line, position);
 }
 
 /*
@@ -1420,6 +1653,24 @@ static bool validate_and_store_frame(BoardLinkSource source)
   }
   sample_count_digital = (has_digital != 0U) ? count : 0U;
   sample_interval_us = interval;
+  if ((frame_type == FRAME_TYPE_CH1) ||
+      (frame_type == FRAME_TYPE_CH1_CH2))
+  {
+    measure_analog_channel(samples_ch1, sample_count_ch1, interval,
+                           &analog_measurements[0]);
+  }
+  if ((frame_type == FRAME_TYPE_CH2) ||
+      (frame_type == FRAME_TYPE_CH1_CH2))
+  {
+    measure_analog_channel(samples_ch2, sample_count_ch2, interval,
+                           &analog_measurements[1]);
+  }
+  if (has_digital != 0U)
+  {
+    measure_digital_channel(0x01U, interval, &digital_measurements[0]);
+    measure_digital_channel(0x02U, interval, &digital_measurements[1]);
+    measure_digital_channel(0x04U, interval, &digital_measurements[2]);
+  }
   /*
    * 等待采集端确认新档位期间，保留用户刚选择的界面状态，避免旧数据帧
    * 把按钮立即“跳回”原档位。收到目标采样间隔后结束等待。
@@ -1460,6 +1711,7 @@ static bool validate_and_store_frame(BoardLinkSource source)
   visual_state = RX_FRAME_OK;
   frame_ready = true;
   send_frame_ack("OK", frame_sequence, count, interval, source);
+  send_measurement_debug();
   return true;
 }
 
@@ -1767,6 +2019,7 @@ void App_ReceiverInit(void)
   render_waiting_screen();
 
   BoardLink_Init();
+  select_timebase(2U);
   {
     char banner[40];
     uint8_t position = 0U;

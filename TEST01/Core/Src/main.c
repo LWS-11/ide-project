@@ -161,6 +161,8 @@ int main(void)
         uint16_t d1_high_run = 0U;
         uint16_t d1_max_low_run = 0U;
         uint16_t d1_max_high_run = 0U;
+        uint16_t d2_high_count = 0U;
+        uint16_t d3_high_count = 0U;
 
         for (uint16_t i = 0U; i < PROTOCOL_SAMPLES_PER_CHANNEL; ++i)
         {
@@ -197,6 +199,8 @@ int main(void)
             d1_high_run = 0U;
             if (d1_low_run > d1_max_low_run) d1_max_low_run = d1_low_run;
           }
+          if ((digital_samples[i] & 0x02U) != 0U) d2_high_count++;
+          if ((digital_samples[i] & 0x04U) != 0U) d3_high_count++;
         }
 
         /*
@@ -268,7 +272,9 @@ int main(void)
                 ch2_raw_max,
                 d1_high_count,
                 d1_max_low_run,
-                d1_max_high_run);
+                d1_max_high_run,
+                d2_high_count,
+                d3_high_count);
           }
           tx_sequence++;
         }

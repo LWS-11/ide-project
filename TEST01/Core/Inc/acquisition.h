@@ -43,7 +43,9 @@ void Acquisition_ReportFrameStatus(uint16_t sequence,
                                    uint16_t ch2_raw_max,
                                    uint16_t d1_high_count,
                                    uint16_t d1_max_low_run,
-                                   uint16_t d1_max_high_run);
+                                   uint16_t d1_max_high_run,
+                                   uint16_t d2_high_count,
+                                   uint16_t d3_high_count);
 
 uint8_t Acquisition_GetLatestFrame(uint16_t *ch1,
                                    uint16_t *ch2,
