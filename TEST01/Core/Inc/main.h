@@ -69,6 +69,8 @@ void Error_Handler(void);
 #define TEST_D3_TIM12_CH1_D6_GPIO_Port GPIOH
 #define TEST_D2_TIM5_CH4_D5_Pin GPIO_PIN_0
 #define TEST_D2_TIM5_CH4_D5_GPIO_Port GPIOI
+#define TEST_FREQ_TIM1_CH1_D10_Pin GPIO_PIN_8
+#define TEST_FREQ_TIM1_CH1_D10_GPIO_Port GPIOA
 
 /* USER CODE BEGIN Private defines */
 

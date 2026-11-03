@@ -58,6 +58,7 @@ static volatile uint8_t digital_write_half;
 static volatile uint8_t digital_completed_half;
 static volatile uint8_t digital_previous_value;
 static volatile uint32_t digital_edge_count[3];
+static uint16_t generator_frequency_hz = 1000U;
 
 static UartRxRing uart1_rx;
 static UartRxRing uart7_rx;
@@ -319,6 +320,12 @@ uint8_t Acquisition_Init(void)
     return 0U;
   }
 
+  if ((HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_1) != HAL_OK) ||
+      !Acquisition_SetGeneratorFrequency(1000U))
+  {
+    return 0U;
+  }
+
   {
     uint8_t d1_started =
         (HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1) == HAL_OK) ? 1U : 0U;
@@ -363,9 +370,45 @@ uint8_t Acquisition_Init(void)
       (uint16_t)(sizeof("TEST PWM:D1=TIM3_CH1/D3,D2=TIM5_CH4/D5,D3=TIM12_CH1/D6\r\n") -
                  1U));
   Acquisition_UartWriteRaw(
+      &huart1,
+      (const uint8_t *)"GEN PWM:D10/PA8,TIM1_CH1,100-10000Hz\r\n",
+      (uint16_t)(sizeof("GEN PWM:D10/PA8,TIM1_CH1,100-10000Hz\r\n") - 1U));
+  Acquisition_UartWriteRaw(
       &huart7,
       (const uint8_t *)"LINK READY,ROLE=TX\r\n",
       (uint16_t)(sizeof("LINK READY,ROLE=TX\r\n") - 1U));
+  return 1U;
+}
+
+uint8_t Acquisition_SetGeneratorFrequency(uint16_t frequency_hz)
+{
+  uint32_t period;
+  uint32_t pulse;
+
+  if ((frequency_hz < 100U) || (frequency_hz > 10000U))
+  {
+    return 0U;
+  }
+
+  period = 1000000UL / frequency_hz;
+  if (period < 2U)
+  {
+    return 0U;
+  }
+  pulse = period / 2U;
+  __HAL_TIM_SET_AUTORELOAD(&htim1, period - 1U);
+  __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, pulse);
+  htim1.Init.Period = period - 1U;
+  generator_frequency_hz = frequency_hz;
+
+  {
+    char line[32];
+    uint16_t position = 0U;
+    Acquisition_AppendText(line, &position, sizeof(line), "GEN FREQ=");
+    Acquisition_AppendUint(line, &position, sizeof(line), frequency_hz);
+    Acquisition_AppendText(line, &position, sizeof(line), "\r\n");
+    Acquisition_UartWriteRaw(&huart1, (const uint8_t *)line, position);
+  }
   return 1U;
 }
 
@@ -448,6 +491,8 @@ void Acquisition_ReportFrameStatus(uint16_t sequence,
   Acquisition_AppendUint(line, &position, sizeof(line), d1_max_low_run);
   Acquisition_AppendText(line, &position, sizeof(line), ",D1HMAX=");
   Acquisition_AppendUint(line, &position, sizeof(line), d1_max_high_run);
+  Acquisition_AppendText(line, &position, sizeof(line), ",GEN=");
+  Acquisition_AppendUint(line, &position, sizeof(line), generator_frequency_hz);
   Acquisition_AppendText(line, &position, sizeof(line), "\r\n");
   Acquisition_UartWriteRaw(&huart1, (const uint8_t *)line, position);
 }
@@ -457,42 +502,54 @@ void Acquisition_Process(void)
   while (uart1_rx.tail != uart1_rx.head)
   {
     ProtocolScanMode mode;
+    uint16_t generator_frequency = 0U;
     uint8_t byte = uart1_rx.buffer[uart1_rx.tail];
     uart1_rx.tail = (uint8_t)((uart1_rx.tail + 1U) & UART_RX_RING_MASK);
 
     uint8_t ascii_command =
         Acquisition_PushAsciiControl(&uart1_rx, byte, &mode);
     uint8_t binary_command =
-        Protocol_PushControlByte(&uart1_rx.parser, byte, &mode);
+        Protocol_PushControlByte(&uart1_rx.parser, byte, &mode,
+                                 &generator_frequency);
 
     if (binary_command)
     {
       uart1_rx.command_length = 0U;
     }
-    if (ascii_command || binary_command)
+    if (ascii_command || (binary_command == 1U))
     {
       Acquisition_HandleCommand(mode);
+    }
+    else if (binary_command == 2U)
+    {
+      (void)Acquisition_SetGeneratorFrequency(generator_frequency);
     }
   }
 
   while (uart7_rx.tail != uart7_rx.head)
   {
     ProtocolScanMode mode;
+    uint16_t generator_frequency = 0U;
     uint8_t byte = uart7_rx.buffer[uart7_rx.tail];
     uart7_rx.tail = (uint8_t)((uart7_rx.tail + 1U) & UART_RX_RING_MASK);
 
     uint8_t ascii_command =
         Acquisition_PushAsciiControl(&uart7_rx, byte, &mode);
     uint8_t binary_command =
-        Protocol_PushControlByte(&uart7_rx.parser, byte, &mode);
+        Protocol_PushControlByte(&uart7_rx.parser, byte, &mode,
+                                 &generator_frequency);
 
     if (binary_command)
     {
       uart7_rx.command_length = 0U;
     }
-    if (ascii_command || binary_command)
+    if (ascii_command || (binary_command == 1U))
     {
       Acquisition_HandleCommand(mode);
+    }
+    else if (binary_command == 2U)
+    {
+      (void)Acquisition_SetGeneratorFrequency(generator_frequency);
     }
   }
 

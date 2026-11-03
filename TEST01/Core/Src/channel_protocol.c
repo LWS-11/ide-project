@@ -130,9 +130,11 @@ void Protocol_InitControlParser(ProtocolControlParser *parser)
 
 uint8_t Protocol_PushControlByte(ProtocolControlParser *parser,
                                  uint8_t byte,
-                                 ProtocolScanMode *mode)
+                                 ProtocolScanMode *mode,
+                                 uint16_t *generator_frequency_hz)
 {
-  if ((parser == NULL) || (mode == NULL))
+  if ((parser == NULL) || (mode == NULL) ||
+      (generator_frequency_hz == NULL))
   {
     return 0U;
   }
@@ -162,13 +164,21 @@ uint8_t Protocol_PushControlByte(ProtocolControlParser *parser,
       break;
 
     case 3U:
-      parser->state =
-          (byte == PROTOCOL_CONTROL_COMMAND_SET_TIMEBASE) ? 4U : 0U;
+      if ((byte == PROTOCOL_CONTROL_COMMAND_SET_TIMEBASE) ||
+          (byte == PROTOCOL_CONTROL_COMMAND_SET_FREQUENCY))
+      {
+        parser->command = byte;
+        parser->state = 4U;
+      }
+      else
+      {
+        parser->state = 0U;
+      }
       break;
 
     case 4U:
       parser->gear = byte;
-      parser->state = (byte <= 2U) ? 5U : 0U;
+      parser->state = 5U;
       break;
 
     case 5U:
@@ -192,7 +202,7 @@ uint8_t Protocol_PushControlByte(ProtocolControlParser *parser,
         PROTOCOL_CONTROL_SYNC_0,
         PROTOCOL_CONTROL_SYNC_1,
         PROTOCOL_VERSION,
-        PROTOCOL_CONTROL_COMMAND_SET_TIMEBASE,
+        parser->command,
         parser->gear,
         parser->interval_low,
         parser->interval_high
@@ -202,15 +212,35 @@ uint8_t Protocol_PushControlByte(ProtocolControlParser *parser,
       uint16_t interval =
           (uint16_t)parser->interval_low |
           ((uint16_t)parser->interval_high << 8U);
+      uint16_t frequency =
+          (uint16_t)parser->gear |
+          ((uint16_t)parser->interval_low << 8U);
       ProtocolScanMode requested_mode;
+      uint8_t command = parser->command;
 
       Protocol_ResetControlParser(parser);
-      if ((Protocol_Crc16(crc_input, sizeof(crc_input)) == received_crc) &&
-          Protocol_IntervalToMode(interval, &requested_mode) &&
-          ((uint8_t)requested_mode == parser->gear))
+      if (Protocol_Crc16(crc_input, sizeof(crc_input)) != received_crc)
       {
-        *mode = requested_mode;
-        return 1U;
+        break;
+      }
+      if (command == PROTOCOL_CONTROL_COMMAND_SET_TIMEBASE)
+      {
+        if ((parser->gear <= 2U) &&
+            Protocol_IntervalToMode(interval, &requested_mode) &&
+            ((uint8_t)requested_mode == parser->gear))
+        {
+          *mode = requested_mode;
+          return 1U;
+        }
+      }
+      else if (command == PROTOCOL_CONTROL_COMMAND_SET_FREQUENCY)
+      {
+        if ((frequency >= 100U) && (frequency <= 10000U) &&
+            (parser->interval_high == 0U))
+        {
+          *generator_frequency_hz = frequency;
+          return 2U;
+        }
       }
       break;
     }

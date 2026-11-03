@@ -44,6 +44,7 @@ extern "C" {
                                           PROTOCOL_BYTES_PER_POINT) + 2U)
 
 #define PROTOCOL_CONTROL_COMMAND_SET_TIMEBASE 0x01U
+#define PROTOCOL_CONTROL_COMMAND_SET_FREQUENCY 0x02U
 #define PROTOCOL_CONTROL_FRAME_SIZE     9U
 
 typedef enum
@@ -56,6 +57,7 @@ typedef enum
 typedef struct
 {
   uint8_t state;
+  uint8_t command;
   uint8_t gear;
   uint8_t interval_low;
   uint8_t interval_high;
@@ -78,7 +80,8 @@ uint8_t Protocol_IntervalToMode(uint16_t interval_us, ProtocolScanMode *mode);
 void Protocol_InitControlParser(ProtocolControlParser *parser);
 uint8_t Protocol_PushControlByte(ProtocolControlParser *parser,
                                  uint8_t byte,
-                                 ProtocolScanMode *mode);
+                                 ProtocolScanMode *mode,
+                                 uint16_t *generator_frequency_hz);
 
 #ifdef __cplusplus
 }

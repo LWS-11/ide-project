@@ -26,6 +26,7 @@ typedef struct
 } AcquisitionStats;
 
 uint8_t Acquisition_Init(void);
+uint8_t Acquisition_SetGeneratorFrequency(uint16_t frequency_hz);
 void Acquisition_Process(void);
 uint8_t Acquisition_TransmitFrame(const uint8_t *frame, uint16_t length);
 void Acquisition_ReportFrameStatus(uint16_t sequence,

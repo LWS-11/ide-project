@@ -24,12 +24,61 @@
 
 /* USER CODE END 0 */
 
+TIM_HandleTypeDef htim1;
 TIM_HandleTypeDef htim3;
 TIM_HandleTypeDef htim5;
 TIM_HandleTypeDef htim12;
 TIM_HandleTypeDef htim8;
 
 void HAL_TIM_MspPostInit(TIM_HandleTypeDef* timHandle);
+
+/* TIM1 CH1 adjustable square wave: PA8 / Arduino D10, default 1 kHz. */
+void MX_TIM1_Init(void)
+{
+  TIM_ClockConfigTypeDef sClockSourceConfig = {0};
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
+  TIM_OC_InitTypeDef sConfigOC = {0};
+
+  htim1.Instance = TIM1;
+  htim1.Init.Prescaler = 215;
+  htim1.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim1.Init.Period = 999;
+  htim1.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim1.Init.RepetitionCounter = 0;
+  htim1.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_ENABLE;
+  if (HAL_TIM_Base_Init(&htim1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
+  if (HAL_TIM_ConfigClockSource(&htim1, &sClockSourceConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_TIM_PWM_Init(&htim1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim1, &sMasterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sConfigOC.OCMode = TIM_OCMODE_PWM1;
+  sConfigOC.Pulse = 500;
+  sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
+  sConfigOC.OCNPolarity = TIM_OCNPOLARITY_HIGH;
+  sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
+  sConfigOC.OCIdleState = TIM_OCIDLESTATE_RESET;
+  sConfigOC.OCNIdleState = TIM_OCNIDLESTATE_RESET;
+  if (HAL_TIM_PWM_ConfigChannel(&htim1, &sConfigOC, TIM_CHANNEL_1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  __HAL_TIM_ENABLE_OCxPRELOAD(&htim1, TIM_CHANNEL_1);
+  HAL_TIM_MspPostInit(&htim1);
+}
 
 /* TIM3 CH1 test output: PB4 / Arduino D3. */
 void MX_TIM3_Init(void)
@@ -192,7 +241,11 @@ void MX_TIM8_Init(void)
 void HAL_TIM_Base_MspInit(TIM_HandleTypeDef* tim_baseHandle)
 {
 
-  if(tim_baseHandle->Instance==TIM8)
+  if(tim_baseHandle->Instance==TIM1)
+  {
+    __HAL_RCC_TIM1_CLK_ENABLE();
+  }
+  else if(tim_baseHandle->Instance==TIM8)
   {
   /* USER CODE BEGIN TIM8_MspInit 0 */
 
@@ -219,7 +272,11 @@ void HAL_TIM_Base_MspInit(TIM_HandleTypeDef* tim_baseHandle)
 
 void HAL_TIM_PWM_MspInit(TIM_HandleTypeDef* tim_pwmHandle)
 {
-  if(tim_pwmHandle->Instance==TIM12)
+  if(tim_pwmHandle->Instance==TIM1)
+  {
+    __HAL_RCC_TIM1_CLK_ENABLE();
+  }
+  else if(tim_pwmHandle->Instance==TIM12)
   {
     __HAL_RCC_TIM12_CLK_ENABLE();
   }
@@ -229,7 +286,17 @@ void HAL_TIM_MspPostInit(TIM_HandleTypeDef* timHandle)
 {
   GPIO_InitTypeDef GPIO_InitStruct = {0};
 
-  if(timHandle->Instance==TIM3)
+  if(timHandle->Instance==TIM1)
+  {
+    __HAL_RCC_GPIOA_CLK_ENABLE();
+    GPIO_InitStruct.Pin = TEST_FREQ_TIM1_CH1_D10_Pin;
+    GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
+    GPIO_InitStruct.Pull = GPIO_NOPULL;
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+    GPIO_InitStruct.Alternate = GPIO_AF1_TIM1;
+    HAL_GPIO_Init(TEST_FREQ_TIM1_CH1_D10_GPIO_Port, &GPIO_InitStruct);
+  }
+  else if(timHandle->Instance==TIM3)
   {
     __HAL_RCC_GPIOB_CLK_ENABLE();
     GPIO_InitStruct.Pin = TEST_D1_TIM3_CH1_D3_Pin;

@@ -75,6 +75,7 @@
 #define CONTROL_SYNC_1 0x5CU
 #define CONTROL_VERSION 0x01U
 #define CONTROL_CMD_TIMEBASE 0x01U
+#define CONTROL_CMD_FREQUENCY 0x02U
 
 /* 顶部三个直接档位按钮。 */
 #define TOUCH_BUTTON_Y0 4
@@ -94,6 +95,17 @@
 #define DIGITAL_CHANNEL_COUNT 3U
 #define DIGITAL_LANE_HEIGHT 18
 #define DIGITAL_SCROLL_STEP 2U
+
+#define FREQ_SLIDER_X0 312
+#define FREQ_SLIDER_X1 470
+#define FREQ_TRACK_X0 330
+#define FREQ_TRACK_X1 468
+#define FREQ_SLIDER_Y0 42
+#define FREQ_SLIDER_Y1 68
+#define FREQ_CONTROL_MIN 100U
+#define FREQ_CONTROL_MAX 10000U
+#define FREQ_SWITCH_TO_5MS_ABOVE 500U
+#define FREQ_SWITCH_TO_1MS_ABOVE 2000U
 
 /* ============================ 3. 运行状态 ============================ */
 /* 两个帧缓冲区都位于外部 SDRAM，元素类型是 RGB565 的 16 位颜色。 */
@@ -130,6 +142,7 @@ static uint16_t sample_count_digital;
 static uint16_t sample_interval_us;
 static uint16_t frame_sequence;
 static uint16_t digital_display_offset;
+static uint16_t generator_frequency_hz = 1000U;
 static volatile bool frame_ready;
 
 /* 调试和运行统计变量：接收成功数、CRC 错误数、缓冲区溢出数。 */
@@ -158,6 +171,8 @@ static uint32_t timebase_retry_at_ms;
 static bool timebase_failed;
 static uint32_t timebase_failed_at_ms;
 static bool timebase_user_selected;
+
+static void select_timebase(uint8_t index);
 
 typedef enum
 {
@@ -473,6 +488,59 @@ static void draw_channel_buttons(uint16_t *framebuffer)
   }
 }
 
+static uint16_t frequency_from_slider(int x)
+{
+  int span = FREQ_TRACK_X1 - FREQ_TRACK_X0;
+  int half = span / 2;
+  int position;
+
+  if (x <= FREQ_TRACK_X0) return FREQ_CONTROL_MIN;
+  if (x >= FREQ_TRACK_X1) return FREQ_CONTROL_MAX;
+  position = x - FREQ_TRACK_X0;
+  if (position <= half)
+  {
+    return (uint16_t)(FREQ_CONTROL_MIN +
+                      ((uint32_t)position * 900U) / (uint32_t)half);
+  }
+  return (uint16_t)(1000U +
+                    ((uint32_t)(position - half) * 9000U) /
+                        (uint32_t)(span - half));
+}
+
+static int slider_x_from_frequency(uint16_t frequency)
+{
+  int span = FREQ_TRACK_X1 - FREQ_TRACK_X0;
+  int half = span / 2;
+
+  if (frequency <= 1000U)
+  {
+    return FREQ_TRACK_X0 +
+           ((int)(frequency - 100U) * half) / 900;
+  }
+  return FREQ_TRACK_X0 + half +
+         ((int)(frequency - 1000U) * (span - half)) / 9000;
+}
+
+static void draw_frequency_slider(uint16_t *framebuffer)
+{
+  char label[18] = "F=";
+  char number[6];
+  int knob_x = slider_x_from_frequency(generator_frequency_hz);
+
+  format_uint(number, generator_frequency_hz);
+  strcat(label, number);
+  strcat(label, "HZ");
+
+  fill_rect(framebuffer, FREQ_SLIDER_X0, FREQ_SLIDER_Y0,
+            FREQ_SLIDER_X1, FREQ_SLIDER_Y1, COLOR_PANEL);
+  draw_text(framebuffer, FREQ_SLIDER_X0 + 2, FREQ_SLIDER_Y0 + 2,
+            label, COLOR_TEXT, 1);
+  line_h(framebuffer, FREQ_TRACK_X0, FREQ_TRACK_X1,
+         FREQ_SLIDER_Y0 + 19, COLOR_GRID_MAJOR);
+  fill_rect(framebuffer, knob_x - 2, FREQ_SLIDER_Y0 + 13,
+            knob_x + 2, FREQ_SLIDER_Y0 + 25, COLOR_CH1);
+}
+
 static void draw_grid(uint16_t *framebuffer)
 {
   uint8_t i;
@@ -519,6 +587,7 @@ static void draw_grid(uint16_t *framebuffer)
             touch_ready ? COLOR_CH1 : COLOR_ERROR, 1);
   draw_timebase_buttons(framebuffer);
   draw_channel_buttons(framebuffer);
+  draw_frequency_slider(framebuffer);
 }
 
 /*
@@ -761,6 +830,7 @@ static void render_waiting_screen(void)
          LCD_FRAME_PIXELS * sizeof(uint16_t));
   draw_timebase_buttons(framebuffer);
   draw_channel_buttons(framebuffer);
+  draw_frequency_slider(framebuffer);
   draw_channel_reading(framebuffer, 50, CHANNEL_LABEL_CH1,
                        COLOR_CH1, NULL, 0U);
   draw_channel_reading(framebuffer, 168, CHANNEL_LABEL_CH2,
@@ -784,6 +854,7 @@ static void render_received_frame(void)
          LCD_FRAME_PIXELS * sizeof(uint16_t));
   draw_timebase_buttons(framebuffer);
   draw_channel_buttons(framebuffer);
+  draw_frequency_slider(framebuffer);
   if (channel_visible[0])
   {
     draw_waveform(framebuffer, samples_ch1, sample_count_ch1, COLOR_CH1);
@@ -965,6 +1036,70 @@ static void send_timebase_command(uint8_t index)
   BoardLink_WritePc(packet, sizeof(packet));
 }
 
+static void send_frequency_command(uint16_t frequency_hz)
+{
+  uint8_t packet[9];
+  uint16_t crc;
+
+  if ((frequency_hz < FREQ_CONTROL_MIN) ||
+      (frequency_hz > FREQ_CONTROL_MAX))
+  {
+    return;
+  }
+
+  packet[0] = CONTROL_SYNC_0;
+  packet[1] = CONTROL_SYNC_1;
+  packet[2] = CONTROL_VERSION;
+  packet[3] = CONTROL_CMD_FREQUENCY;
+  packet[4] = (uint8_t)(frequency_hz & 0xFFU);
+  packet[5] = (uint8_t)(frequency_hz >> 8U);
+  packet[6] = 0U;
+  crc = crc16_ccitt(packet, 7U);
+  packet[7] = (uint8_t)(crc & 0xFFU);
+  packet[8] = (uint8_t)(crc >> 8U);
+
+  BoardLink_WriteBoard(packet, sizeof(packet));
+
+  {
+    char line[32];
+    uint8_t position = 0U;
+    append_text(line, &position, sizeof(line), "FREQ REQ=");
+    append_number(line, &position, sizeof(line), frequency_hz);
+    append_text(line, &position, sizeof(line), "\r\n");
+    BoardLink_WritePc((const uint8_t *)line, position);
+  }
+}
+
+static void set_generator_frequency(uint16_t frequency_hz)
+{
+  if ((frequency_hz < FREQ_CONTROL_MIN) ||
+      (frequency_hz > FREQ_CONTROL_MAX) ||
+      (frequency_hz == generator_frequency_hz))
+  {
+    return;
+  }
+
+  generator_frequency_hz = frequency_hz;
+  send_frequency_command(frequency_hz);
+
+  /*
+   * A square wave needs several samples per half cycle. Promote the
+   * acquisition timebase automatically instead of displaying an aliased
+   * low-frequency replica of a high-frequency generator signal.
+   */
+  if ((frequency_hz > FREQ_SWITCH_TO_1MS_ABOVE) &&
+      (timebase_index < 2U))
+  {
+    select_timebase(2U);
+  }
+  else if ((frequency_hz > FREQ_SWITCH_TO_5MS_ABOVE) &&
+           (timebase_index < 1U))
+  {
+    select_timebase(1U);
+  }
+  frame_ready = true;
+}
+
 static void send_timebase_debug(const char *prefix, uint8_t index,
                                 uint16_t interval)
 {
@@ -1106,6 +1241,18 @@ static void poll_timebase_touch(void)
 
   pressed = Touchscreen_ReadPoint(&x, &y);
   now = HAL_GetTick();
+
+  /* The frequency slider is a continuous control, not a one-shot button. */
+  if (pressed &&
+      (y >= FREQ_SLIDER_Y0) && (y <= FREQ_SLIDER_Y1) &&
+      (x >= FREQ_TRACK_X0) && (x <= FREQ_TRACK_X1))
+  {
+    set_generator_frequency(frequency_from_slider(x));
+    touch_was_down = true;
+    touch_last_change_ms = now;
+    return;
+  }
+
   if ((pressed == touch_was_down) ||
       ((now - touch_last_change_ms) < TOUCH_DEBOUNCE_MS))
   {
@@ -1316,6 +1463,36 @@ static bool validate_and_store_frame(BoardLinkSource source)
   return true;
 }
 
+static bool parse_frequency_command(uint8_t length, uint16_t *frequency)
+{
+  uint32_t value = 0U;
+
+  if ((frequency == NULL) || (length < 4U) ||
+      (pc_command_buffer[0] != 'G') ||
+      (pc_command_buffer[1] != 'F') ||
+      (pc_command_buffer[2] != '='))
+  {
+    return false;
+  }
+
+  for (uint8_t index = 3U; index < length; ++index)
+  {
+    char character = pc_command_buffer[index];
+    if ((character < '0') || (character > '9'))
+    {
+      return false;
+    }
+    value = (value * 10U) + (uint32_t)(character - '0');
+  }
+
+  if ((value < FREQ_CONTROL_MIN) || (value > FREQ_CONTROL_MAX))
+  {
+    return false;
+  }
+  *frequency = (uint16_t)value;
+  return true;
+}
+
 /*
  * 串口字节状态机。
  * 第 1 阶段等 A5，第 2 阶段等 5A，收到 12 字节帧头后计算总长度，
@@ -1342,6 +1519,14 @@ static void parser_push(uint8_t byte, BoardLinkSource source)
             (pc_command_buffer[3] <= '2'))
         {
           select_timebase((uint8_t)(pc_command_buffer[3] - '0'));
+        }
+        else
+        {
+          uint16_t frequency;
+          if (parse_frequency_command(pc_command_length, &frequency))
+          {
+            set_generator_frequency(frequency);
+          }
         }
         pc_command_length = 0U;
       }
