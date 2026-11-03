@@ -35,17 +35,17 @@ uint16_t Protocol_ScanIntervalUs(ProtocolScanMode mode)
 {
   switch (mode)
   {
+    case PROTOCOL_SCAN_100US:
+      return 2U;
+
+    case PROTOCOL_SCAN_500US:
+      return 10U;
+
     case PROTOCOL_SCAN_5MS:
       return 100U;
 
     case PROTOCOL_SCAN_1MS:
       return 20U;
-
-    case PROTOCOL_SCAN_500US:
-      return 10U;
-
-    case PROTOCOL_SCAN_100US:
-      return 2U;
 
     case PROTOCOL_SCAN_10MS:
     default:
@@ -62,6 +62,14 @@ uint8_t Protocol_IntervalToMode(uint16_t interval_us, ProtocolScanMode *mode)
 
   switch (interval_us)
   {
+    case 2U:
+      *mode = PROTOCOL_SCAN_100US;
+      return 1U;
+
+    case 10U:
+      *mode = PROTOCOL_SCAN_500US;
+      return 1U;
+
     case 200U:
       *mode = PROTOCOL_SCAN_10MS;
       return 1U;
@@ -72,14 +80,6 @@ uint8_t Protocol_IntervalToMode(uint16_t interval_us, ProtocolScanMode *mode)
 
     case 20U:
       *mode = PROTOCOL_SCAN_1MS;
-      return 1U;
-
-    case 10U:
-      *mode = PROTOCOL_SCAN_500US;
-      return 1U;
-
-    case 2U:
-      *mode = PROTOCOL_SCAN_100US;
       return 1U;
 
     default:
@@ -239,7 +239,7 @@ uint8_t Protocol_PushControlByte(ProtocolControlParser *parser,
       }
       if (command == PROTOCOL_CONTROL_COMMAND_SET_TIMEBASE)
       {
-        if ((parser->gear < PROTOCOL_SCAN_MODE_COUNT) &&
+        if ((parser->gear <= 4U) &&
             Protocol_IntervalToMode(interval, &requested_mode) &&
             ((uint8_t)requested_mode == parser->gear))
         {

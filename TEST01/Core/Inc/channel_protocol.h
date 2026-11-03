@@ -53,8 +53,7 @@ typedef enum
   PROTOCOL_SCAN_5MS = 1,
   PROTOCOL_SCAN_1MS = 2,
   PROTOCOL_SCAN_500US = 3,
-  PROTOCOL_SCAN_100US = 4,
-  PROTOCOL_SCAN_MODE_COUNT = 5
+  PROTOCOL_SCAN_100US = 4
 } ProtocolScanMode;
 
 typedef struct

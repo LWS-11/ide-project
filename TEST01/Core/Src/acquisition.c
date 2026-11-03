@@ -194,22 +194,54 @@ static uint32_t Acquisition_TimerPeriod(ProtocolScanMode scan_mode)
 {
   switch (scan_mode)
   {
+    case PROTOCOL_SCAN_100US:
+      return TIMER_ARR_SCAN_100US;
+
+    case PROTOCOL_SCAN_500US:
+      return TIMER_ARR_SCAN_500US;
+
     case PROTOCOL_SCAN_5MS:
       return TIMER_ARR_SCAN_5MS;
 
     case PROTOCOL_SCAN_1MS:
       return TIMER_ARR_SCAN_1MS;
 
-    case PROTOCOL_SCAN_500US:
-      return TIMER_ARR_SCAN_500US;
-
-    case PROTOCOL_SCAN_100US:
-      return TIMER_ARR_SCAN_100US;
-
     case PROTOCOL_SCAN_10MS:
     default:
       return TIMER_ARR_SCAN_10MS;
   }
+}
+
+static uint8_t Acquisition_ConfigureAdcInputs(ProtocolScanMode scan_mode)
+{
+  ADC_ChannelConfTypeDef channel_config = {0};
+  uint32_t ch1_sample_time = ADC_SAMPLETIME_84CYCLES;
+  uint32_t ch2_sample_time = ADC_SAMPLETIME_28CYCLES;
+
+  /*
+   * A 100 us/div frame contains 50 points per division, so the real sample
+   * interval is 2 us. The normal long sample windows cannot finish that
+   * quickly. Use the ADC's shortest window only in this fastest gear while
+   * retaining the noise-resistant windows in the other four gears.
+   */
+  if (scan_mode == PROTOCOL_SCAN_100US)
+  {
+    ch1_sample_time = ADC_SAMPLETIME_3CYCLES;
+    ch2_sample_time = ADC_SAMPLETIME_3CYCLES;
+  }
+
+  channel_config.Channel = ADC_CHANNEL_7;
+  channel_config.Rank = ADC_REGULAR_RANK_1;
+  channel_config.SamplingTime = ch1_sample_time;
+  if (HAL_ADC_ConfigChannel(&hadc3, &channel_config) != HAL_OK)
+  {
+    return 0U;
+  }
+
+  channel_config.Channel = ADC_CHANNEL_0;
+  channel_config.Rank = ADC_REGULAR_RANK_2;
+  channel_config.SamplingTime = ch2_sample_time;
+  return (HAL_ADC_ConfigChannel(&hadc3, &channel_config) == HAL_OK) ? 1U : 0U;
 }
 
 static void Acquisition_ClearCapture(void)
@@ -258,6 +290,11 @@ static uint8_t Acquisition_Start(void)
 static uint8_t Acquisition_ApplyMode(ProtocolScanMode scan_mode)
 {
   uint32_t period = Acquisition_TimerPeriod(scan_mode);
+
+  if (!Acquisition_ConfigureAdcInputs(scan_mode))
+  {
+    return 0U;
+  }
 
   __HAL_TIM_SET_PRESCALER(&htim8, TIM8_PRESCALER);
   __HAL_TIM_SET_AUTORELOAD(&htim8, period);

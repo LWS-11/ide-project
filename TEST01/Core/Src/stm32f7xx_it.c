@@ -238,7 +238,18 @@ void USART1_IRQHandler(void)
 void TIM8_UP_TIM13_IRQHandler(void)
 {
   /* USER CODE BEGIN TIM8_UP_TIM13_IRQn 0 */
-  Acquisition_TimerTick();
+  /*
+   * At 2 us per sample the generic HAL timer dispatcher is too slow: a second
+   * update can arrive before it returns, and the hardware then keeps only one
+   * pending interrupt. Clear UPDATE first and do the short digital capture
+   * directly so every ADC trigger also gets one digital sample.
+   */
+  if ((htim8.Instance->SR & TIM_SR_UIF) != 0U)
+  {
+    __HAL_TIM_CLEAR_FLAG(&htim8, TIM_FLAG_UPDATE);
+    Acquisition_TimerTick();
+    return;
+  }
   /* USER CODE END TIM8_UP_TIM13_IRQn 0 */
   HAL_TIM_IRQHandler(&htim8);
   /* USER CODE BEGIN TIM8_UP_TIM13_IRQn 1 */
