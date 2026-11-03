@@ -43,6 +43,26 @@ class ProtocolTests(unittest.TestCase):
             self.assertEqual(parsed.mode, mode)
             self.assertEqual(parsed.interval_us, interval)
 
+    def test_all_scan_modes_preserve_digital_samples(self):
+        expected_intervals = (200, 100, 20, 10, 2)
+        self.assertEqual(protocol.SCAN_INTERVALS_US, expected_intervals)
+        digital = tuple(index & 0x07 for index in range(500))
+        for mode, interval in enumerate(expected_intervals):
+            raw = protocol.build_data_frame(
+                [1000] * 500,
+                [1500] * 500,
+                mode,
+                mode,
+                digital,
+            )
+            parsed = protocol.decode_data_frame(raw)
+            self.assertEqual(parsed.interval_us, interval)
+            self.assertEqual(parsed.digital, digital)
+            self.assertAlmostEqual(
+                parsed.scan_seconds,
+                interval * 500 / 1_000_000.0,
+            )
+
     def test_incremental_parser_handles_partial_and_sticky_frames(self):
         first = protocol.build_data_frame(
             [100] * 500,

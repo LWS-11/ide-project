@@ -242,10 +242,10 @@ try {
     }
     Write-Host "PASS: 格式错帧被拒绝" -ForegroundColor Green
 
-    Write-Host "4/6 检查 200/100/20 us 三档数据协议..."
+    Write-Host "4/6 检查 200/100/20/10/2 us 五档数据协议..."
     $sequence = 3
     $seenIntervals = [System.Collections.Generic.HashSet[int]]::new()
-    foreach ($interval in 200, 100, 20) {
+    foreach ($interval in 200, 100, 20, 10, 2) {
         Send-TestFrame $sequence $interval $false
         $ack = Wait-Ack "OK" $sequence 1000
         if (($null -eq $ack) -or ($ack.IntervalUs -ne $interval) -or
@@ -256,19 +256,23 @@ try {
         $sequence++
         Start-Sleep -Milliseconds $FrameDelayMs
     }
-    if (($seenIntervals.Count -ne 3) -or
+    if (($seenIntervals.Count -ne 5) -or
         -not $seenIntervals.Contains(200) -or
         -not $seenIntervals.Contains(100) -or
-        -not $seenIntervals.Contains(20)) {
-        throw "三档间隔未全部通过"
+        -not $seenIntervals.Contains(20) -or
+        -not $seenIntervals.Contains(10) -or
+        -not $seenIntervals.Contains(2)) {
+        throw "五档间隔未全部通过"
     }
-    Write-Host "PASS: 10ms/5ms/1ms 对应 200/100/20 us" -ForegroundColor Green
+    Write-Host "PASS: 10ms/5ms/1ms/500us/100us 对应 200/100/20/10/2 us" -ForegroundColor Green
 
     Write-Host "5/6 检查 PC 到接收端再到 PC 的换档控制闭环..."
     foreach ($test in @(
         [pscustomobject]@{ Index = 0; IntervalUs = 200 },
         [pscustomobject]@{ Index = 1; IntervalUs = 100 },
-        [pscustomobject]@{ Index = 2; IntervalUs = 20 })) {
+        [pscustomobject]@{ Index = 2; IntervalUs = 20 },
+        [pscustomobject]@{ Index = 3; IntervalUs = 10 },
+        [pscustomobject]@{ Index = 4; IntervalUs = 2 })) {
         $command = [System.Text.Encoding]::ASCII.GetBytes(
             ("TB={0}`r`n" -f $test.Index))
         $port.Write($command, 0, $command.Length)
@@ -300,7 +304,9 @@ try {
             $event = $script:controlEvents.Dequeue()
             if (($event.IntervalUs -eq 200) -or
                 ($event.IntervalUs -eq 100) -or
-                ($event.IntervalUs -eq 20)) {
+                ($event.IntervalUs -eq 20) -or
+                ($event.IntervalUs -eq 10) -or
+                ($event.IntervalUs -eq 2)) {
                 $currentInterval = $event.IntervalUs
                 $controlCount++
             }

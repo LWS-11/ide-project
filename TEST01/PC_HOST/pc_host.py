@@ -145,11 +145,16 @@ class WaveformCanvas(tk.Canvas):
         for index in range(11):
             x = left + (plot_width * index / 10)
             self.create_line(x, top, x, height - bottom, fill="#263442")
-            scan_ms = self.scan_seconds * 1000
+            elapsed = self.scan_seconds * index / 10
+            label = (
+                f"{elapsed * 1e6:.0f}us"
+                if elapsed < 0.001
+                else f"{elapsed * 1e3:.2f}ms"
+            )
             self.create_text(
                 x,
                 height - bottom + 10,
-                text=f"{scan_ms * index / 10:.2f}",
+                text=label,
                 fill="#9FB2C3",
                 anchor="n",
                 font=("Consolas", 9),
@@ -158,7 +163,7 @@ class WaveformCanvas(tk.Canvas):
         self.create_text(
             width - right,
             height - 7,
-            text="time / ms",
+            text="time",
             fill="#9FB2C3",
             anchor="se",
             font=("Microsoft YaHei UI", 9),
@@ -210,7 +215,7 @@ class HostApplication:
         self.root = root
         self.root.title("STM32F746 双通道数据采集（团队协议）")
         self.root.geometry("1040x680")
-        self.root.minsize(760, 520)
+        self.root.minsize(1040, 560)
 
         self.frame_queue: queue.Queue[UiFrame] = queue.Queue(maxsize=200)
         self.error_queue: queue.Queue[str] = queue.Queue()

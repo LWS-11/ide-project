@@ -38,7 +38,7 @@ python pc_host.py
 
 1. 点击“刷新”，选择 `STMicroelectronics STLink Virtual COM Port` 对应的 COM 口。
 2. 点击“连接”，程序会自动发送 10 ms 扫描命令。
-3. 使用“10 ms”“5 ms”“1 ms”按钮切换扫描窗口。
+3. 使用“10 ms”“5 ms”“1 ms”“500 us”“100 us”按钮切换扫描窗口。
 4. 观察 CH1 电位器（ADC3_IN7 / PF9）和
    CH2 麦克风（ADC3_IN0 / PA0）波形、电压、帧率及丢帧统计。
 

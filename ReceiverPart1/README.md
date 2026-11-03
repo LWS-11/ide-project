@@ -1,4 +1,4 @@
-# Remote Acquisition Receiver - Basic Items 1-3
+# Remote Acquisition Receiver - Five Time Bases
 
 This project is the display-side STM32F746G-DISCO firmware:
 
@@ -7,8 +7,8 @@ This project is the display-side STM32F746G-DISCO firmware:
 - validate version, length, channel flag, and CRC-16;
 - discard damaged frames and resynchronize from the next `A5 5A` marker;
 - display CH1 and CH2 in different colors over the 0-3 V range;
-- select 10 ms/div, 5 ms/div, or 1 ms/div with the touch screen
-  (`10MS`, `5MS`, `1MS`) or compatibility user button (`PI11`);
+- select 10 ms/div, 5 ms/div, 1 ms/div, 500 us/div, or 100 us/div
+  with the touch screen (`10MS`, `5MS`, `1MS`, `500US`, `100US`);
 - detect the FT5336 touch controller over I2C3 (`PH7`/`PH8`, address `0x70`);
 - retry an unacknowledged time-base command until a matching data frame arrives;
 - notify the acquisition board of a time-base change over UART7;
@@ -55,14 +55,15 @@ All multi-byte fields are little-endian.
 | 4 | 2 | sequence number |
 | 6 | 2 | sample count, 1 to 500 |
 | 8 | 2 | sample interval in microseconds |
-| 10 | 1 | channel flags: CH1=`01`, CH2=`02`, both=`03` |
+| 10 | 1 | channel flags: CH1=`01`, CH2=`02`, both=`03`, digital=`04` |
 | 11 | 1 | reserved, currently `0x00` |
-| 12 | variable | CH1/CH2: N `uint16` mV values; both: interleaved CH1/CH2 pairs |
+| 12 | variable | dual extended frame: N interleaved `CH1 mV, CH2 mV, D1..D3` groups |
 | end | 2 | CRC-16/CCITT-FALSE over all bytes before the CRC |
 
-For 10 ms/div and 50 samples per division, send `N=500` with
-`sample_interval_us=200`. For 5 ms/div use 100 us, and for 1 ms/div use
-20 us. Every frame contains 500 samples per channel.
+The five time bases use 50 samples per division and 500 samples per channel:
+10 ms/div uses 200 us, 5 ms/div uses 100 us, 1 ms/div uses 20 us, 500 us/div
+uses 10 us, and 100 us/div uses 2 us. The three digital channels are sampled
+on the same timer event and share the analog time axis.
 
 CRC parameters: polynomial `0x1021`, initial value `0xFFFF`, no reflection,
 no final XOR. The CRC field itself is little-endian.
@@ -102,15 +103,15 @@ the user button is pressed. It is sent on UART7 and mirrored to USART1:
 | 0 | 2 | sync `C5 5C` |
 | 2 | 1 | protocol version `01` |
 | 3 | 1 | command `01` (time base) |
-| 4 | 1 | time-base index: `0=10ms`, `1=5ms`, `2=1ms` |
+| 4 | 1 | time-base index: `0=10ms`, `1=5ms`, `2=1ms`, `3=500us`, `4=100us` |
 | 5 | 2 | requested sample interval in microseconds |
 | 7 | 2 | CRC-16/CCITT-FALSE over bytes 0-6 |
 
-The user button cycles `10 ms -> 5 ms -> 1 ms -> 10 ms`. Touch buttons select
-their time base directly.
+The user button pauses and resumes waveform updates. Touch buttons select a
+time base directly.
 
-For PC automation, `TB=0`, `TB=1`, and `TB=2` text commands enter the same
-selection function as the touch buttons. The receiver then emits the binary
+For PC automation, `TB=0` through `TB=4` text commands enter the same selection
+function as the touch buttons. The receiver then emits the binary
 `C5 5C` packet above. This is used by the connection test to verify the
 receiver-to-acquisition control path without human timing.
 
@@ -127,10 +128,10 @@ The test checks:
 
 1. normal CH1+CH2 frame and ACK;
 2. CRC-corrupted frame rejection;
-3. 200/100/20 us intervals for 10 ms/5 ms/1 ms per division;
+3. 200/100/20/10/2 us intervals for the five scan-time settings;
 4. `C5 5C` time-base control packet and host-side interval switching;
-5. continuous bidirectional traffic. Touch the three buttons or press the user
-   button while this phase runs to observe live control packets.
+5. continuous bidirectional traffic. Touch any of the five scan-time buttons
+   while this phase runs to observe live control packets.
 
 The upper-computer integration notes and recorded test results are in
 `上位机.md`.

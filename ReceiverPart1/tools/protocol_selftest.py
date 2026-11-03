@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate the ReceiverPart1/USART6 board-link protocol without hardware."""
+"""Validate the ReceiverPart1/UART7 board-link protocol without hardware."""
 
 from __future__ import annotations
 
@@ -11,11 +11,11 @@ FRAME_SYNC = b"\xA5\x5A"
 CONTROL_SYNC = b"\xC5\x5C"
 PROTOCOL_VERSION = 0x01
 FRAME_TYPE_BOTH = 0x30
-FRAME_FLAGS_BOTH = 0x03
+FRAME_FLAGS_ALL = 0x07
 SAMPLE_COUNT = 500
 HEADER_SIZE = 12
 CRC_SIZE = 2
-PAYLOAD_SIZE = SAMPLE_COUNT * 4
+PAYLOAD_SIZE = SAMPLE_COUNT * 5
 FRAME_SIZE = HEADER_SIZE + PAYLOAD_SIZE + CRC_SIZE
 
 
@@ -39,7 +39,7 @@ def build_frame(sequence: int = 0, interval_us: int = 200) -> bytes:
     struct.pack_into("<H", frame, 4, sequence & 0xFFFF)
     struct.pack_into("<H", frame, 6, SAMPLE_COUNT)
     struct.pack_into("<H", frame, 8, interval_us)
-    frame[10] = FRAME_FLAGS_BOTH
+    frame[10] = FRAME_FLAGS_ALL
     frame[11] = 0
 
     for index in range(SAMPLE_COUNT):
@@ -49,7 +49,9 @@ def build_frame(sequence: int = 0, interval_us: int = 200) -> bytes:
         triangle2 = phase2 if phase2 < 128 else 255 - phase2
         ch1 = 200 + (triangle1 * (2900 - 200)) // 127
         ch2 = 300 + (triangle2 * (2700 - 300)) // 127
-        struct.pack_into("<HH", frame, HEADER_SIZE + index * 4, ch1, ch2)
+        offset = HEADER_SIZE + index * 5
+        struct.pack_into("<HH", frame, offset, ch1, ch2)
+        frame[offset + 4] = index & 0x07
 
     crc = crc16_ccitt_false(bytes(frame[:-CRC_SIZE]))
     struct.pack_into("<H", frame, FRAME_SIZE - CRC_SIZE, crc)
@@ -61,14 +63,14 @@ def parse_frame(frame: bytes) -> dict[str, int | bool]:
         raise ValueError(f"frame size {len(frame)} != {FRAME_SIZE}")
 
     count = struct.unpack_from("<H", frame, 6)[0]
-    expected_size = HEADER_SIZE + count * 4 + CRC_SIZE
+    expected_size = HEADER_SIZE + count * 5 + CRC_SIZE
     received_crc = struct.unpack_from("<H", frame, len(frame) - 2)[0]
     calculated_crc = crc16_ccitt_false(frame[:-2])
     result = {
         "sync_ok": frame[:2] == FRAME_SYNC,
         "version_ok": frame[2] == PROTOCOL_VERSION,
         "type_ok": frame[3] == FRAME_TYPE_BOTH,
-        "flags_ok": frame[10] == FRAME_FLAGS_BOTH,
+        "flags_ok": frame[10] == FRAME_FLAGS_ALL,
         "reserved_ok": frame[11] == 0,
         "length_ok": len(frame) == expected_size,
         "crc_ok": received_crc == calculated_crc,
@@ -79,6 +81,7 @@ def parse_frame(frame: bytes) -> dict[str, int | bool]:
         "crc_received": received_crc,
         "ch1_first": struct.unpack_from("<H", frame, 12)[0],
         "ch2_first": struct.unpack_from("<H", frame, 14)[0],
+        "d1_first": frame[16],
     }
     result["all_ok"] = all(
         result[key]
@@ -111,17 +114,31 @@ def parse_control(packet: bytes) -> dict[str, int | bool]:
         raise ValueError(f"control size {len(packet)} != 9")
     received_crc = struct.unpack_from("<H", packet, 7)[0]
     calculated_crc = crc16_ccitt_false(packet[:7])
+    timebase_index = packet[4]
+    interval_us = struct.unpack_from("<H", packet, 5)[0]
+    expected_intervals = (200, 100, 20, 10, 2)
     result = {
         "sync_ok": packet[:2] == CONTROL_SYNC,
         "version_ok": packet[2] == PROTOCOL_VERSION,
         "command_ok": packet[3] == 0x01,
         "crc_ok": received_crc == calculated_crc,
-        "timebase_index": packet[4],
-        "interval_us": struct.unpack_from("<H", packet, 5)[0],
+        "timebase_index": timebase_index,
+        "interval_us": interval_us,
+        "timebase_ok": (
+            timebase_index < len(expected_intervals)
+            and interval_us == expected_intervals[timebase_index]
+        ),
         "all_ok": False,
     }
     result["all_ok"] = all(
-        result[key] for key in ("sync_ok", "version_ok", "command_ok", "crc_ok")
+        result[key]
+        for key in (
+            "sync_ok",
+            "version_ok",
+            "command_ok",
+            "crc_ok",
+            "timebase_ok",
+        )
     )
     return result
 
@@ -133,10 +150,14 @@ def main() -> int:
         print(f"FAIL built data frame: {frame_result}")
         return 1
 
-    for index, interval in enumerate((200, 100, 20)):
+    for index, interval in enumerate((200, 100, 20, 10, 2)):
         control = build_control(index, interval)
         control_result = parse_control(control)
-        if not control_result["all_ok"]:
+        if (
+            not control_result["all_ok"]
+            or control_result["timebase_index"] != index
+            or control_result["interval_us"] != interval
+        ):
             print(f"FAIL control {index}: {control_result}")
             return 1
 

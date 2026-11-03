@@ -194,8 +194,9 @@ static void handle_control_packet(void)
   timebase_index = control_buffer[4];
   interval = (uint16_t)control_buffer[5] |
              ((uint16_t)control_buffer[6] << 8);
-  if ((timebase_index <= 2U) &&
-      ((interval == 200U) || (interval == 100U) || (interval == 20U)))
+  if ((timebase_index <= 4U) &&
+      ((interval == 200U) || (interval == 100U) || (interval == 20U) ||
+       (interval == 10U) || (interval == 2U)))
   {
     sample_interval_us = interval;
     ++control_packet_count;

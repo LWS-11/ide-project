@@ -24,6 +24,8 @@
 #define TIMER_ARR_SCAN_10MS             ((TIMER_CLOCK_HZ / 5000UL) - 1UL)
 #define TIMER_ARR_SCAN_5MS              ((TIMER_CLOCK_HZ / 10000UL) - 1UL)
 #define TIMER_ARR_SCAN_1MS              ((TIMER_CLOCK_HZ / 50000UL) - 1UL)
+#define TIMER_ARR_SCAN_500US            ((TIMER_CLOCK_HZ / 100000UL) - 1UL)
+#define TIMER_ARR_SCAN_100US            ((TIMER_CLOCK_HZ / 500000UL) - 1UL)
 
 #define UART_RX_RING_SIZE               256U
 #define UART_RX_RING_MASK               (UART_RX_RING_SIZE - 1U)
@@ -77,7 +79,7 @@ static uint8_t Acquisition_PushAsciiControl(UartRxRing *ring,
         (ring->command[1] == 'B') &&
         (ring->command[2] == '=') &&
         (ring->command[3] >= '0') &&
-        (ring->command[3] <= '2'))
+        (ring->command[3] <= '4'))
     {
       *mode = (ProtocolScanMode)(ring->command[3] - '0');
       ring->command_length = 0U;
@@ -197,6 +199,12 @@ static uint32_t Acquisition_TimerPeriod(ProtocolScanMode scan_mode)
 
     case PROTOCOL_SCAN_1MS:
       return TIMER_ARR_SCAN_1MS;
+
+    case PROTOCOL_SCAN_500US:
+      return TIMER_ARR_SCAN_500US;
+
+    case PROTOCOL_SCAN_100US:
+      return TIMER_ARR_SCAN_100US;
 
     case PROTOCOL_SCAN_10MS:
     default:
@@ -630,7 +638,9 @@ uint8_t Acquisition_SetMode(ProtocolScanMode mode)
 {
   if ((mode != PROTOCOL_SCAN_10MS) &&
       (mode != PROTOCOL_SCAN_5MS) &&
-      (mode != PROTOCOL_SCAN_1MS))
+      (mode != PROTOCOL_SCAN_1MS) &&
+      (mode != PROTOCOL_SCAN_500US) &&
+      (mode != PROTOCOL_SCAN_100US))
   {
     return 0U;
   }

@@ -27,8 +27,10 @@ BYTES_PER_POINT = 5
 SCAN_10MS = 0
 SCAN_5MS = 1
 SCAN_1MS = 2
-SCAN_INTERVALS_US = (200, 100, 20)
-SCAN_LABELS = ("10 ms", "5 ms", "1 ms")
+SCAN_500US = 3
+SCAN_100US = 4
+SCAN_INTERVALS_US = (200, 100, 20, 10, 2)
+SCAN_LABELS = ("10 ms", "5 ms", "1 ms", "500 us", "100 us")
 
 
 def crc16_ccitt_false(data: bytes | bytearray | memoryview) -> int:
@@ -81,7 +83,7 @@ class ControlFrame:
 def build_control(mode: int) -> bytes:
     """Build the 9-byte ReceiverPart1 timebase-control packet."""
 
-    if mode not in (SCAN_10MS, SCAN_5MS, SCAN_1MS):
+    if mode < SCAN_10MS or mode >= len(SCAN_INTERVALS_US):
         raise ValueError(f"Invalid scan mode: {mode}")
 
     interval = SCAN_INTERVALS_US[mode]
@@ -114,7 +116,7 @@ def build_data_frame(
         raise ValueError("CH1/CH2 must contain the same positive number of points")
     if len(digital) != len(ch1):
         raise ValueError("Digital sample count must match the analog count")
-    if mode not in (SCAN_10MS, SCAN_5MS, SCAN_1MS):
+    if mode < SCAN_10MS or mode >= len(SCAN_INTERVALS_US):
         raise ValueError(f"Invalid scan mode: {mode}")
 
     points = len(ch1)
@@ -220,7 +222,7 @@ def decode_control_frame(frame: bytes) -> ControlFrame:
 
     mode = frame[4]
     interval_us = int.from_bytes(frame[5:7], "little")
-    if mode > SCAN_1MS or interval_us != SCAN_INTERVALS_US[mode]:
+    if mode >= len(SCAN_INTERVALS_US) or interval_us != SCAN_INTERVALS_US[mode]:
         raise ValueError("Control-frame timebase mismatch")
     return ControlFrame(mode=mode, interval_us=interval_us)
 

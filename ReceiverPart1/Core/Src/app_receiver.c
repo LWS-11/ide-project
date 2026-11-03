@@ -77,13 +77,13 @@
 #define CONTROL_CMD_TIMEBASE 0x01U
 #define CONTROL_CMD_FREQUENCY 0x02U
 
-/* 顶部三个直接档位按钮。 */
+/* 顶部五个直接档位按钮。 */
+#define TIMEBASE_COUNT 5U
 #define TOUCH_BUTTON_Y0 4
 #define TOUCH_BUTTON_Y1 35
-#define TOUCH_BUTTON_WIDTH 66
-#define TOUCH_BUTTON_10MS_X0 276
-#define TOUCH_BUTTON_5MS_X0 344
-#define TOUCH_BUTTON_1MS_X0 412
+#define TOUCH_BUTTON_WIDTH 56
+#define TOUCH_BUTTON_GAP 2
+#define TOUCH_BUTTON_X0 184
 
 #define CHANNEL_BUTTON_Y0 42
 #define CHANNEL_BUTTON_Y1 68
@@ -176,10 +176,15 @@ static bool channel_visible[CHANNEL_BUTTON_COUNT];
 
 /*
  * 数组下标就是 timebase_index。
- * 50 点/格时，200 us × 50 = 10 ms，其余两档同理。
+ * 50 点/格时，间隔 × 50 得到每格时间。
+ * 五档依次为 10 ms、5 ms、1 ms、500 us、100 us。
  */
-static const uint16_t timebase_interval_us[] = {200U, 100U, 20U};
-static const char *const timebase_labels[] = {"10MS", "5MS", "1MS"};
+static const uint16_t timebase_interval_us[TIMEBASE_COUNT] = {
+    200U, 100U, 20U, 10U, 2U
+};
+static const char *const timebase_labels[TIMEBASE_COUNT] = {
+    "10MS", "5MS", "1MS", "500US", "100US"
+};
 static uint8_t timebase_index;
 static bool timebase_pending;
 static uint8_t timebase_pending_index;
@@ -447,22 +452,21 @@ static void format_uint(char *output, uint32_t value)
  */
 static void draw_timebase_buttons(uint16_t *framebuffer)
 {
-  static const int button_x[] = {
-      TOUCH_BUTTON_10MS_X0,
-      TOUCH_BUTTON_5MS_X0,
-      TOUCH_BUTTON_1MS_X0,
-  };
   uint8_t index;
 
-  for (index = 0U; index < 3U; ++index)
+  for (index = 0U; index < TIMEBASE_COUNT; ++index)
   {
-    int x0 = button_x[index];
+    int x0 = TOUCH_BUTTON_X0 +
+             ((int)index * (TOUCH_BUTTON_WIDTH + TOUCH_BUTTON_GAP));
     int x1 = x0 + TOUCH_BUTTON_WIDTH - 1;
     uint16_t fill = (index == timebase_index) ? COLOR_CH1 : COLOR_PANEL;
     uint16_t text = (index == timebase_index) ? COLOR_BACKGROUND : COLOR_TEXT;
+    int label_x = x0 +
+                  ((TOUCH_BUTTON_WIDTH -
+                    ((int)strlen(timebase_labels[index]) * 6)) / 2);
 
     fill_rect(framebuffer, x0, TOUCH_BUTTON_Y0, x1, TOUCH_BUTTON_Y1, fill);
-    draw_text(framebuffer, x0 + 24, 15, timebase_labels[index], text, 1);
+    draw_text(framebuffer, label_x, 15, timebase_labels[index], text, 1);
   }
 }
 
@@ -1240,7 +1244,7 @@ static void send_timebase_command(uint8_t index)
 
   /*
    * 通知采集端切换采样间隔：
-   * index 0 -> 200 us, 1 -> 100 us, 2 -> 20 us。
+   * index 0..4 -> 200/100/20/10/2 us。
    */
   packet[0] = CONTROL_SYNC_0;
   packet[1] = CONTROL_SYNC_1;
@@ -1365,7 +1369,7 @@ static void refresh_timebase_screen(void)
  */
 static void select_timebase(uint8_t index)
 {
-  if (index >= 3U)
+  if (index >= TIMEBASE_COUNT)
   {
     return;
   }
@@ -1501,20 +1505,16 @@ static void poll_timebase_touch(void)
 
   if ((y >= TOUCH_BUTTON_Y0) && (y <= TOUCH_BUTTON_Y1))
   {
-    if ((x >= TOUCH_BUTTON_10MS_X0) &&
-        (x < (TOUCH_BUTTON_10MS_X0 + TOUCH_BUTTON_WIDTH)))
+    for (uint8_t index = 0U; index < TIMEBASE_COUNT; ++index)
     {
-      select_timebase(0U);
-    }
-    else if ((x >= TOUCH_BUTTON_5MS_X0) &&
-             (x < (TOUCH_BUTTON_5MS_X0 + TOUCH_BUTTON_WIDTH)))
-    {
-      select_timebase(1U);
-    }
-    else if ((x >= TOUCH_BUTTON_1MS_X0) &&
-             (x < (TOUCH_BUTTON_1MS_X0 + TOUCH_BUTTON_WIDTH)))
-    {
-      select_timebase(2U);
+      int button_x = TOUCH_BUTTON_X0 +
+                     ((int)index * (TOUCH_BUTTON_WIDTH + TOUCH_BUTTON_GAP));
+      if ((x >= button_x) &&
+          (x < (button_x + TOUCH_BUTTON_WIDTH)))
+      {
+        select_timebase(index);
+        break;
+      }
     }
     return;
   }
@@ -1591,7 +1591,7 @@ static bool validate_and_store_frame(BoardLinkSource source)
   payload_bytes = (uint16_t)(
       count * ((analog_channels * 2U) + has_digital));
   if ((count == 0U) || (count > APP_FRAME_MAX_SAMPLES) ||
-      (interval < 10U) || (interval > 10000U))
+      (interval < 2U) || (interval > 10000U))
   {
     visual_state = RX_FORMAT_ERROR;
     send_frame_ack("FORMAT", sequence, count, interval, source);
@@ -1695,6 +1695,14 @@ static bool validate_and_store_frame(BoardLinkSource source)
       timebase_failed = true;
     }
   }
+  else if (interval <= 3U)
+  {
+    timebase_index = 4U;
+  }
+  else if (interval <= 15U)
+  {
+    timebase_index = 3U;
+  }
   else if (interval <= 30U)
   {
     timebase_index = 2U;
@@ -1768,7 +1776,7 @@ static void parser_push(uint8_t byte, BoardLinkSource source)
             (pc_command_buffer[1] == 'B') &&
             (pc_command_buffer[2] == '=') &&
             (pc_command_buffer[3] >= '0') &&
-            (pc_command_buffer[3] <= '2'))
+            (pc_command_buffer[3] <= '4'))
         {
           select_timebase((uint8_t)(pc_command_buffer[3] - '0'));
         }
@@ -1796,7 +1804,7 @@ static void parser_push(uint8_t byte, BoardLinkSource source)
   }
 
   /*
-   * 文本调试命令与二进制数据帧共用同一串口。TB=0/1/2 会走与触摸按钮
+   * 文本调试命令与二进制数据帧共用同一串口。TB=0..4 会走与触摸按钮
    * 完全相同的换档函数，便于 PC 上位机自动化验证控制包收发。
    */
   if (frame_length == 0U)
@@ -1811,7 +1819,7 @@ static void parser_push(uint8_t byte, BoardLinkSource source)
             (pc_command_buffer[1] == 'B') &&
             (pc_command_buffer[2] == '=') &&
             (pc_command_buffer[3] >= '0') &&
-            (pc_command_buffer[3] <= '2'))
+            (pc_command_buffer[3] <= '4'))
         {
           select_timebase((uint8_t)(pc_command_buffer[3] - '0'));
         }
@@ -2019,7 +2027,7 @@ void App_ReceiverInit(void)
   render_waiting_screen();
 
   BoardLink_Init();
-  select_timebase(2U);
+  select_timebase(0U);
   {
     char banner[40];
     uint8_t position = 0U;
