@@ -111,6 +111,7 @@
 #define FREQ_SWITCH_TO_500US_ABOVE 2000U
 #define FREQ_SWITCH_TO_100US_ABOVE 8000U
 #define ANALOG_FREQUENCY_DIVISOR 2U
+#define CH2_DISPLAY_POINT_DIVISOR 2U
 
 /* ============================ 3. 运行状态 ============================ */
 /* 两个帧缓冲区都位于外部 SDRAM，元素类型是 RGB565 的 16 位颜色。 */
@@ -143,6 +144,9 @@ static uint8_t pc_command_length;
 static uint16_t samples_ch1[APP_FRAME_MAX_SAMPLES];
 static uint16_t samples_ch2[APP_FRAME_MAX_SAMPLES];
 static uint8_t samples_digital[APP_FRAME_MAX_SAMPLES];
+static uint16_t triggered_samples_ch1[APP_FRAME_MAX_SAMPLES];
+static uint16_t triggered_samples_ch2[APP_FRAME_MAX_SAMPLES];
+static uint8_t triggered_samples_digital[APP_FRAME_MAX_SAMPLES];
 static uint16_t snapshot_ch1[APP_FRAME_MAX_SAMPLES];
 static uint16_t snapshot_ch2[APP_FRAME_MAX_SAMPLES];
 static uint8_t snapshot_digital[APP_FRAME_MAX_SAMPLES];
@@ -223,6 +227,25 @@ typedef enum
 } RxVisualState;
 
 static RxVisualState visual_state = RX_WAITING;
+
+typedef enum
+{
+  TRIGGER_OFF = 0,
+  TRIGGER_A1,
+  TRIGGER_A2,
+  TRIGGER_D1,
+  TRIGGER_D2,
+  TRIGGER_D3
+} TriggerSource;
+
+static TriggerSource trigger_source = TRIGGER_OFF;
+static bool trigger_rising_edge = true;
+static uint16_t trigger_level_mv = 1500U;
+static uint16_t trigger_offset;
+static bool trigger_found;
+static bool trigger_menu_open;
+
+static const char *trigger_source_name(TriggerSource source);
 
 /* 5×7 点阵字库：只保存数字和英文大写字母，节省 Flash。 */
 static const uint8_t font_5x7[36][5] =
@@ -593,8 +616,74 @@ static void draw_save_status(uint16_t *framebuffer)
     color = save_status_ok ? COLOR_OK : COLOR_ERROR;
   }
 
-  fill_rect(framebuffer, 2, 242, 72, 266, COLOR_PANEL);
+  fill_rect(framebuffer, 2, 242, 62, 266, COLOR_PANEL);
   draw_text(framebuffer, 8, 249, label, color, 1);
+}
+
+static void draw_trigger_button(uint16_t *framebuffer)
+{
+  char label[20] = "TRG:";
+
+  strcat(label, trigger_source_name(trigger_source));
+  strcat(label, trigger_rising_edge ? " R" : " F");
+  if ((trigger_source == TRIGGER_A1) || (trigger_source == TRIGGER_A2))
+  {
+    char number[8];
+    format_uint(number, trigger_level_mv);
+    strcat(label, number);
+  }
+
+  fill_rect(framebuffer, 68, 242, 178, 266,
+            trigger_menu_open ? COLOR_WARN : COLOR_PANEL);
+  draw_text(framebuffer, 74, 249, label,
+            trigger_source == TRIGGER_OFF ? COLOR_MUTED : COLOR_TEXT, 1);
+}
+
+static void draw_trigger_config(uint16_t *framebuffer)
+{
+  static const char *const sources[] =
+      {"OFF", "A1", "A2", "D1", "D2", "D3"};
+  char level_text[18] = "LEVEL ";
+  char number[8];
+
+  fill_rect(framebuffer, 34, 72, 446, 230, COLOR_PANEL);
+  draw_text(framebuffer, 48, 80, "TRIGGER SETUP", COLOR_TEXT, 1);
+
+  for (uint8_t index = 0U; index < 6U; ++index)
+  {
+    int x0 = 48 + (int)index * 62;
+    bool selected = ((uint8_t)trigger_source == index);
+    fill_rect(framebuffer, x0, 98, x0 + 54, 120,
+              selected ? COLOR_CH1 : COLOR_BACKGROUND);
+    draw_text(framebuffer, x0 + 14, 104, sources[index],
+              selected ? COLOR_BACKGROUND : COLOR_TEXT, 1);
+  }
+
+  fill_rect(framebuffer, 48, 132, 116, 154,
+            trigger_rising_edge ? COLOR_CH1 : COLOR_BACKGROUND);
+  draw_text(framebuffer, 68, 138, "RISE",
+            trigger_rising_edge ? COLOR_BACKGROUND : COLOR_TEXT, 1);
+  fill_rect(framebuffer, 122, 132, 190, 154,
+            !trigger_rising_edge ? COLOR_CH1 : COLOR_BACKGROUND);
+  draw_text(framebuffer, 140, 138, "FALL",
+            !trigger_rising_edge ? COLOR_BACKGROUND : COLOR_TEXT, 1);
+
+  fill_rect(framebuffer, 48, 166, 104, 188, COLOR_BACKGROUND);
+  draw_text(framebuffer, 54, 172, "-500", COLOR_TEXT, 1);
+  fill_rect(framebuffer, 110, 166, 166, 188, COLOR_BACKGROUND);
+  draw_text(framebuffer, 116, 172, "-100", COLOR_TEXT, 1);
+  fill_rect(framebuffer, 292, 166, 348, 188, COLOR_BACKGROUND);
+  draw_text(framebuffer, 298, 172, "+100", COLOR_TEXT, 1);
+  fill_rect(framebuffer, 354, 166, 410, 188, COLOR_BACKGROUND);
+  draw_text(framebuffer, 360, 172, "+500", COLOR_TEXT, 1);
+
+  format_uint(number, trigger_level_mv);
+  strcat(level_text, number);
+  strcat(level_text, "MV");
+  draw_text(framebuffer, 174, 172, level_text, COLOR_CH2, 1);
+
+  fill_rect(framebuffer, 380, 198, 438, 222, COLOR_OK);
+  draw_text(framebuffer, 392, 205, "CLOSE", COLOR_BACKGROUND, 1);
 }
 
 static void draw_grid(uint16_t *framebuffer)
@@ -638,11 +727,11 @@ static void draw_grid(uint16_t *framebuffer)
   draw_text(framebuffer, 4, 123, "1.5", COLOR_MUTED, 1);
   draw_text(framebuffer, 4, 161, "0.0", COLOR_MUTED, 1);
   draw_text(framebuffer, 4, 4, "T/DIV", COLOR_MUTED, 1);
-  draw_save_status(framebuffer);
   draw_timebase_buttons(framebuffer);
   draw_channel_buttons(framebuffer);
   draw_frequency_slider(framebuffer);
   draw_save_status(framebuffer);
+  draw_trigger_button(framebuffer);
 }
 
 /*
@@ -660,6 +749,50 @@ static void draw_waveform(uint16_t *framebuffer, const uint16_t *data,
 
   if ((data == NULL) || (count == 0U))
   {
+    return;
+  }
+
+  /*
+   * CH2经过显示点数除以2后，250个点少于绘图区像素数。若仍按“一列重复
+   * 一个采样点”绘制，正弦波和方波都会出现明显水平小台阶。这里用相邻
+   * 采样点做线性插值：麦克风曲线变平滑，方波跳变仍只跨越很短的水平距离。
+   */
+  if (count < PLOT_WIDTH)
+  {
+    int previous_center;
+    uint16_t first_value = (data[0] > 3000U) ? 3000U : data[0];
+
+    previous_center = ANALOG_PLOT_BOTTOM -
+                      ((int)first_value * (PLOT_HEIGHT - 1)) / 3000;
+    pixel_put(framebuffer, PLOT_LEFT, previous_center, color);
+
+    for (int column = PLOT_LEFT + 1; column <= PLOT_RIGHT; ++column)
+    {
+      uint64_t position_q16 =
+          ((uint64_t)(column - PLOT_LEFT) * (count - 1U) * 65536ULL) /
+          (PLOT_WIDTH - 1U);
+      uint16_t index = (uint16_t)(position_q16 >> 16U);
+      uint16_t fraction = (uint16_t)(position_q16 & 0xFFFFU);
+      uint16_t next_index;
+      uint32_t value;
+      int y;
+
+      if (index >= (uint16_t)(count - 1U))
+      {
+        index = (uint16_t)(count - 2U);
+        fraction = 0xFFFFU;
+      }
+      next_index = (uint16_t)(index + 1U);
+      value =
+          (((uint32_t)data[index] * (65536UL - fraction)) +
+           ((uint32_t)data[next_index] * fraction) + 32768UL) >> 16U;
+      if (value > 3000U) value = 3000U;
+      y = ANALOG_PLOT_BOTTOM - ((int)value * (PLOT_HEIGHT - 1)) / 3000;
+
+      pixel_put(framebuffer, column, y, color);
+      line_v(framebuffer, column, previous_center, y, color);
+      previous_center = y;
+    }
     return;
   }
 
@@ -718,6 +851,108 @@ static void draw_waveform(uint16_t *framebuffer, const uint16_t *data,
     previous_center = (y_top + y_bottom) / 2;
     have_previous = true;
   }
+}
+
+static const char *trigger_source_name(TriggerSource source)
+{
+  switch (source)
+  {
+    case TRIGGER_A1: return "A1";
+    case TRIGGER_A2: return "A2";
+    case TRIGGER_D1: return "D1";
+    case TRIGGER_D2: return "D2";
+    case TRIGGER_D3: return "D3";
+    default: return "OFF";
+  }
+}
+
+/*
+ * 在接收到的500点数据中寻找指定触发边沿，并把所有通道循环搬移，
+ * 使触发点固定落在屏幕最左侧。这样每次刷新时波形不会随机左右跳动。
+ */
+static bool prepare_triggered_frame(void)
+{
+  uint16_t count = sample_count_ch1;
+  uint8_t digital_mask = 0U;
+
+  trigger_found = false;
+  trigger_offset = 0U;
+  if (trigger_source == TRIGGER_OFF || count < 2U)
+  {
+    return false;
+  }
+
+  if ((trigger_source == TRIGGER_A2) && (sample_count_ch2 < count))
+  {
+    count = sample_count_ch2;
+  }
+  if ((trigger_source >= TRIGGER_D1) && (sample_count_digital < count))
+  {
+    count = sample_count_digital;
+  }
+  if (count < 2U)
+  {
+    return false;
+  }
+
+  switch (trigger_source)
+  {
+    case TRIGGER_D1: digital_mask = 0x01U; break;
+    case TRIGGER_D2: digital_mask = 0x02U; break;
+    case TRIGGER_D3: digital_mask = 0x04U; break;
+    default: break;
+  }
+
+  for (uint16_t index = 1U; index < count; ++index)
+  {
+    bool crossed;
+
+    if (digital_mask != 0U)
+    {
+      bool previous_high =
+          (samples_digital[index - 1U] & digital_mask) != 0U;
+      bool current_high =
+          (samples_digital[index] & digital_mask) != 0U;
+      crossed = trigger_rising_edge
+                    ? (!previous_high && current_high)
+                    : (previous_high && !current_high);
+    }
+    else
+    {
+      const uint16_t *source =
+          (trigger_source == TRIGGER_A2) ? samples_ch2 : samples_ch1;
+      crossed = trigger_rising_edge
+                    ? ((source[index - 1U] < trigger_level_mv) &&
+                       (source[index] >= trigger_level_mv))
+                    : ((source[index - 1U] > trigger_level_mv) &&
+                       (source[index] <= trigger_level_mv));
+    }
+
+    if (crossed)
+    {
+      trigger_offset = index;
+      trigger_found = true;
+      break;
+    }
+  }
+
+  if (!trigger_found)
+  {
+    return false;
+  }
+
+  for (uint16_t index = 0U; index < count; ++index)
+  {
+    uint16_t source_index = (uint16_t)(trigger_offset + index);
+    if (source_index >= count)
+    {
+      source_index = (uint16_t)(source_index - count);
+    }
+    triggered_samples_ch1[index] = samples_ch1[source_index];
+    triggered_samples_ch2[index] = samples_ch2[source_index];
+    triggered_samples_digital[index] = samples_digital[source_index];
+  }
+  return true;
 }
 
 static void measure_analog_channel(const uint16_t *data, uint16_t count,
@@ -866,8 +1101,9 @@ static void measure_digital_channel(uint8_t bit_mask, uint16_t interval_us,
   }
 }
 
-static void draw_digital_waveform(uint16_t *framebuffer, uint8_t bit_mask,
-                                  uint8_t digital_index)
+static void draw_digital_waveform(uint16_t *framebuffer,
+                                  const uint8_t *digital_data,
+                                  uint8_t bit_mask, uint8_t digital_index)
 {
   int lane_y = DIGITAL_AREA_TOP + 7 +
                ((int)digital_index * DIGITAL_LANE_HEIGHT);
@@ -903,7 +1139,7 @@ static void draw_digital_waveform(uint16_t *framebuffer, uint8_t bit_mask,
       {
         source_index = (uint16_t)(source_index - sample_count_digital);
       }
-      if ((samples_digital[source_index] & bit_mask) != 0U)
+      if ((digital_data[source_index] & bit_mask) != 0U)
       {
         any_high = true;
       }
@@ -998,6 +1234,8 @@ static void draw_status(uint16_t *framebuffer, RxVisualState status,
   uint16_t color;
   const char *label;
 
+  (void)detail;
+
   switch (status)
   {
     case RX_FRAME_OK:
@@ -1020,10 +1258,6 @@ static void draw_status(uint16_t *framebuffer, RxVisualState status,
   }
 
   draw_text(framebuffer, 393, 248, label, color, 1);
-  if (detail != NULL)
-  {
-    draw_text(framebuffer, 76, 248, detail, COLOR_MUTED, 1);
-  }
 
   if (sample_interval_us > 0U)
   {
@@ -1034,16 +1268,16 @@ static void draw_status(uint16_t *framebuffer, RxVisualState status,
     strcat(rate_text, number);
     strcat(rate_text, "US");
   }
-  draw_text(framebuffer, 166, 248, rate_text,
+  draw_text(framebuffer, 184, 248, rate_text,
             timebase_pending ? COLOR_WARN :
             (timebase_failed ? COLOR_ERROR : COLOR_MUTED), 1);
   if (waveform_paused)
   {
-    draw_text(framebuffer, 306, 248, "PAUSED", COLOR_WARN, 1);
+    draw_text(framebuffer, 286, 248, "PAUSED", COLOR_WARN, 1);
   }
   else if (timebase_failed)
   {
-    draw_text(framebuffer, 306, 248, "TB FAIL", COLOR_ERROR, 1);
+    draw_text(framebuffer, 286, 248, "TB FAIL", COLOR_ERROR, 1);
   }
 }
 
@@ -1067,12 +1301,17 @@ static void render_waiting_screen(void)
   draw_channel_buttons(framebuffer);
   draw_frequency_slider(framebuffer);
   draw_save_status(framebuffer);
+  draw_trigger_button(framebuffer);
   draw_analog_measurement(framebuffer, 8, "CH1",
                           COLOR_CH1, &analog_measurements[0]);
   draw_analog_measurement(framebuffer, 150, "CH2",
                           COLOR_CH2, &analog_measurements[1]);
   draw_text(framebuffer, 112, 142, "WAITING FOR DATA", COLOR_WARN, 1);
   draw_status(framebuffer, RX_WAITING, NULL);
+  if (trigger_menu_open)
+  {
+    draw_trigger_config(framebuffer);
+  }
   present_frame(framebuffer);
 }
 
@@ -1082,24 +1321,39 @@ static void render_waiting_screen(void)
  */
 static void render_received_frame(void)
 {
-  char sequence_text[12];
+  char trigger_text[20] = "TRG:OFF";
+  uint16_t ch2_display_count =
+      (uint16_t)(sample_count_ch2 / CH2_DISPLAY_POINT_DIVISOR);
+  const uint16_t *render_ch1 = samples_ch1;
+  const uint16_t *render_ch2 = samples_ch2;
+  const uint8_t *render_digital = samples_digital;
+  bool trigger_active = prepare_triggered_frame();
   /* 当前前台缓冲区保持显示，新的完整帧画到后台缓冲区。 */
   uint16_t *framebuffer = framebuffers[active_framebuffer ^ 1U];
+
+  if (trigger_active)
+  {
+    render_ch1 = triggered_samples_ch1;
+    render_ch2 = triggered_samples_ch2;
+    render_digital = triggered_samples_digital;
+  }
 
   memcpy(framebuffer, background_framebuffer,
          LCD_FRAME_PIXELS * sizeof(uint16_t));
   draw_timebase_buttons(framebuffer);
   draw_channel_buttons(framebuffer);
   draw_frequency_slider(framebuffer);
+  draw_save_status(framebuffer);
+  draw_trigger_button(framebuffer);
   if (channel_visible[0])
   {
-    draw_waveform(framebuffer, samples_ch1, sample_count_ch1, COLOR_CH1);
+    draw_waveform(framebuffer, render_ch1, sample_count_ch1, COLOR_CH1);
   }
   if (channel_visible[1])
   {
-    draw_waveform(framebuffer, samples_ch2, sample_count_ch2, COLOR_CH2);
+    draw_waveform(framebuffer, render_ch2, ch2_display_count, COLOR_CH2);
   }
-  if (sample_count_digital > 0U)
+  if (!trigger_active && (sample_count_digital > 0U))
   {
     digital_display_offset =
         (uint16_t)(digital_display_offset + DIGITAL_SCROLL_STEP);
@@ -1109,9 +1363,13 @@ static void render_received_frame(void)
           (uint16_t)(digital_display_offset - sample_count_digital);
     }
   }
-  draw_digital_waveform(framebuffer, 0x01U, 0U);
-  draw_digital_waveform(framebuffer, 0x02U, 1U);
-  draw_digital_waveform(framebuffer, 0x04U, 2U);
+  else if (trigger_active)
+  {
+    digital_display_offset = 0U;
+  }
+  draw_digital_waveform(framebuffer, render_digital, 0x01U, 0U);
+  draw_digital_waveform(framebuffer, render_digital, 0x02U, 1U);
+  draw_digital_waveform(framebuffer, render_digital, 0x04U, 2U);
   draw_digital_measurements(framebuffer);
   draw_analog_measurement(framebuffer, 8, "CH1",
                           COLOR_CH1, &analog_measurements[0]);
@@ -1124,12 +1382,23 @@ static void render_received_frame(void)
     draw_text(framebuffer, 150, 108, "ALL CHANNELS OFF", COLOR_WARN, 1);
   }
 
-  sequence_text[0] = 'S';
-  sequence_text[1] = 'E';
-  sequence_text[2] = 'Q';
-  sequence_text[3] = ':';
-  format_uint(&sequence_text[4], frame_sequence);
-  draw_status(framebuffer, visual_state, sequence_text);
+  if (trigger_source != TRIGGER_OFF)
+  {
+    char number[8];
+    strcpy(trigger_text, "TRG:");
+    strcat(trigger_text, trigger_source_name(trigger_source));
+    strcat(trigger_text, trigger_rising_edge ? " R" : " F");
+    if ((trigger_source == TRIGGER_A1) || (trigger_source == TRIGGER_A2))
+    {
+      format_uint(number, trigger_level_mv);
+      strcat(trigger_text, number);
+    }
+  }
+  draw_status(framebuffer, visual_state, trigger_text);
+  if (trigger_menu_open)
+  {
+    draw_trigger_config(framebuffer);
+  }
 
   present_frame(framebuffer);
   /* LTDC 地址切换完成后，交换前后台角色。 */
@@ -1550,6 +1819,69 @@ static void set_generator_frequency(uint16_t frequency_hz)
   frame_ready = true;
 }
 
+static void send_trigger_debug(void)
+{
+  char line[64];
+  uint8_t position = 0U;
+
+  append_text(line, &position, sizeof(line), "TRIGGER,SOURCE=");
+  append_text(line, &position, sizeof(line),
+              trigger_source_name(trigger_source));
+  append_text(line, &position, sizeof(line), ",EDGE=");
+  append_text(line, &position, sizeof(line),
+              trigger_rising_edge ? "R" : "F");
+  append_text(line, &position, sizeof(line), ",LEVEL_MV=");
+  append_number(line, &position, sizeof(line), trigger_level_mv);
+  append_text(line, &position, sizeof(line), "\r\n");
+  BoardLink_WritePc((const uint8_t *)line, position);
+}
+
+static void trigger_settings_changed(void)
+{
+  digital_display_offset = 0U;
+  send_trigger_debug();
+  frame_ready = true;
+  refresh_timebase_screen();
+}
+
+static void select_trigger_source(TriggerSource source)
+{
+  if (trigger_source != source)
+  {
+    trigger_source = source;
+    trigger_settings_changed();
+  }
+}
+
+static void select_trigger_edge(bool rising_edge)
+{
+  if (trigger_rising_edge != rising_edge)
+  {
+    trigger_rising_edge = rising_edge;
+    trigger_settings_changed();
+  }
+}
+
+static void adjust_trigger_level(int16_t delta_mv)
+{
+  int32_t level_mv = (int32_t)trigger_level_mv + delta_mv;
+
+  if (level_mv < 0)
+  {
+    level_mv = 0;
+  }
+  else if (level_mv > 3000)
+  {
+    level_mv = 3000;
+  }
+
+  if ((uint16_t)level_mv != trigger_level_mv)
+  {
+    trigger_level_mv = (uint16_t)level_mv;
+    trigger_settings_changed();
+  }
+}
+
 static void send_timebase_debug(const char *prefix, uint8_t index,
                                 uint16_t interval)
 {
@@ -1711,7 +2043,7 @@ static void poll_timebase_touch(void)
   now = HAL_GetTick();
 
   /* The frequency slider is a continuous control, not a one-shot button. */
-  if (pressed &&
+  if (!trigger_menu_open && pressed &&
       (y >= FREQ_SLIDER_Y0) && (y <= FREQ_SLIDER_Y1) &&
       (x >= FREQ_TRACK_X0) && (x <= FREQ_TRACK_X1))
   {
@@ -1731,6 +2063,76 @@ static void poll_timebase_touch(void)
   touch_last_change_ms = now;
   if (!pressed)
   {
+    return;
+  }
+
+  /*
+   * 触发设置面板打开时，触摸只交给面板处理。这样不会误触下面的
+   * 扫描时间、通道显示或频率滑块，参数修改后面板仍保持打开。
+   */
+  if (trigger_menu_open)
+  {
+    if ((y >= 98U) && (y <= 120U))
+    {
+      for (uint8_t index = 0U; index < 6U; ++index)
+      {
+        int x0 = 48 + (int)index * 62;
+        if ((x >= x0) && (x <= (x0 + 54)))
+        {
+          select_trigger_source((TriggerSource)index);
+          return;
+        }
+      }
+    }
+
+    if ((y >= 132U) && (y <= 154U))
+    {
+      if ((x >= 48U) && (x <= 116U))
+      {
+        select_trigger_edge(true);
+      }
+      else if ((x >= 122U) && (x <= 190U))
+      {
+        select_trigger_edge(false);
+      }
+      return;
+    }
+
+    if ((y >= 166U) && (y <= 188U))
+    {
+      if ((x >= 48U) && (x <= 104U))
+      {
+        adjust_trigger_level(-500);
+      }
+      else if ((x >= 110U) && (x <= 166U))
+      {
+        adjust_trigger_level(-100);
+      }
+      else if ((x >= 292U) && (x <= 348U))
+      {
+        adjust_trigger_level(100);
+      }
+      else if ((x >= 354U) && (x <= 410U))
+      {
+        adjust_trigger_level(500);
+      }
+      return;
+    }
+
+    if ((y >= 198U) && (y <= 222U) &&
+        (x >= 380U) && (x <= 438U))
+    {
+      trigger_menu_open = false;
+      refresh_timebase_screen();
+    }
+    return;
+  }
+
+  /* 底部 TRG 按钮：打开完整的触发参数设置面板。 */
+  if ((y >= 242U) && (y <= 266U) && (x >= 68U) && (x <= 178U))
+  {
+    trigger_menu_open = true;
+    refresh_timebase_screen();
     return;
   }
 
@@ -1975,6 +2377,35 @@ static bool parse_frequency_command(uint8_t length, uint16_t *frequency)
   return true;
 }
 
+static bool parse_trigger_level_command(uint8_t length, uint16_t *level)
+{
+  uint32_t value = 0U;
+
+  if ((level == NULL) || (length < 4U) ||
+      (pc_command_buffer[0] != 'T') ||
+      (pc_command_buffer[1] != 'L') ||
+      (pc_command_buffer[2] != '='))
+  {
+    return false;
+  }
+
+  for (uint8_t index = 3U; index < length; ++index)
+  {
+    char character = pc_command_buffer[index];
+    if ((character < '0') || (character > '9'))
+    {
+      return false;
+    }
+    value = (value * 10U) + (uint32_t)(character - '0');
+  }
+  if (value > 3000U)
+  {
+    return false;
+  }
+  *level = (uint16_t)value;
+  return true;
+}
+
 /*
  * 串口字节状态机。
  * 第 1 阶段等 A5，第 2 阶段等 5A，收到 12 字节帧头后计算总长度，
@@ -2017,12 +2448,72 @@ static void parser_push(uint8_t byte, BoardLinkSource source)
         {
           send_bmp_snapshot();
         }
+        else if (strcmp(pc_command_buffer, "TS=OFF") == 0)
+        {
+          trigger_source = TRIGGER_OFF;
+          digital_display_offset = 0U;
+          send_trigger_debug();
+          frame_ready = true;
+        }
+        else if (strcmp(pc_command_buffer, "TS=A1") == 0)
+        {
+          trigger_source = TRIGGER_A1;
+          digital_display_offset = 0U;
+          send_trigger_debug();
+          frame_ready = true;
+        }
+        else if (strcmp(pc_command_buffer, "TS=A2") == 0)
+        {
+          trigger_source = TRIGGER_A2;
+          digital_display_offset = 0U;
+          send_trigger_debug();
+          frame_ready = true;
+        }
+        else if (strcmp(pc_command_buffer, "TS=D1") == 0)
+        {
+          trigger_source = TRIGGER_D1;
+          digital_display_offset = 0U;
+          send_trigger_debug();
+          frame_ready = true;
+        }
+        else if (strcmp(pc_command_buffer, "TS=D2") == 0)
+        {
+          trigger_source = TRIGGER_D2;
+          digital_display_offset = 0U;
+          send_trigger_debug();
+          frame_ready = true;
+        }
+        else if (strcmp(pc_command_buffer, "TS=D3") == 0)
+        {
+          trigger_source = TRIGGER_D3;
+          digital_display_offset = 0U;
+          send_trigger_debug();
+          frame_ready = true;
+        }
+        else if (strcmp(pc_command_buffer, "TE=R") == 0)
+        {
+          trigger_rising_edge = true;
+          send_trigger_debug();
+          frame_ready = true;
+        }
+        else if (strcmp(pc_command_buffer, "TE=F") == 0)
+        {
+          trigger_rising_edge = false;
+          send_trigger_debug();
+          frame_ready = true;
+        }
         else
         {
-          uint16_t frequency;
-          if (parse_frequency_command(pc_command_length, &frequency))
+          uint16_t value;
+          if (parse_trigger_level_command(pc_command_length, &value))
           {
-            set_generator_frequency(frequency);
+            trigger_level_mv = value;
+            send_trigger_debug();
+            frame_ready = true;
+          }
+          else if (parse_frequency_command(pc_command_length, &value))
+          {
+            set_generator_frequency(value);
           }
         }
         pc_command_length = 0U;

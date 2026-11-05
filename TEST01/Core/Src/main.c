@@ -172,8 +172,26 @@ int main(void)
               (i + 1U >= PROTOCOL_SAMPLES_PER_CHANNEL)
                   ? ch2_samples[i]
                   : ch2_samples[i + 1U];
-          uint16_t mic_filtered =
-              (uint16_t)((previous + (2U * ch2_samples[i]) + next + 2U) / 4U);
+          uint16_t current = ch2_samples[i];
+          uint16_t previous_delta =
+              (current > previous) ? (current - previous) : (previous - current);
+          uint16_t next_delta =
+              (current > next) ? (current - next) : (next - current);
+          uint16_t mic_filtered;
+
+          /*
+           * 平滑普通麦克风噪声，但遇到方波的大幅跳变时直接保留原始点，
+           * 避免把一条垂直边沿平均成多个横向台阶。
+           */
+          if ((previous_delta >= 400U) || (next_delta >= 400U))
+          {
+            mic_filtered = current;
+          }
+          else
+          {
+            mic_filtered =
+                (uint16_t)((previous + (2U * current) + next + 2U) / 4U);
+          }
 
           /* A short symmetric low-pass removes isolated microphone spikes. */
           ch2_mv[i] = AdcRawToMillivolts(mic_filtered);
