@@ -133,6 +133,20 @@ The test checks:
 5. continuous bidirectional traffic. Touch any of the five scan-time buttons
    while this phase runs to observe live control packets.
 
+## Waveform snapshots
+
+Press the board's D4 key (`PG7`, active low) to freeze the current 500-point
+waveform and LCD image. The PC can then request the frozen data over USART1:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\tools\export_snapshot.ps1 `
+  -PortName COM3 -SaveNow
+```
+
+The script sends `SAVE`, requests the CSV with `CSV`, and requests the current
+LCD image with `BMP`. It writes timestamped files plus `最新数据.csv` and
+`最新图片.bmp` in the `snapshot` directory.
+
 The upper-computer integration notes and recorded test results are in
 `上位机.md`.
 

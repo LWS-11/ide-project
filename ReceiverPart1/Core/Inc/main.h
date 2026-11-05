@@ -69,6 +69,8 @@ void Error_Handler(void);
 #define FMC_A1_GPIO_Port GPIOF
 #define KEY_USER_Pin GPIO_PIN_11
 #define KEY_USER_GPIO_Port GPIOI
+#define SAVE_KEY_Pin GPIO_PIN_7
+#define SAVE_KEY_GPIO_Port GPIOG
 #define FMC_A2_Pin GPIO_PIN_2
 #define FMC_A2_GPIO_Port GPIOF
 #define FMC_A3_Pin GPIO_PIN_3

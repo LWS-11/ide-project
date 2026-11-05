@@ -85,6 +85,12 @@ void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_PULLUP;
   HAL_GPIO_Init(KEY_USER_GPIO_Port, &GPIO_InitStruct);
 
+  /* D4 / PG7: active-low snapshot key, other side connected to GND. */
+  GPIO_InitStruct.Pin = SAVE_KEY_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+  GPIO_InitStruct.Pull = GPIO_PULLUP;
+  HAL_GPIO_Init(SAVE_KEY_GPIO_Port, &GPIO_InitStruct);
+
 }
 
 /* USER CODE BEGIN 2 */

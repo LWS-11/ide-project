@@ -41,6 +41,7 @@
 #define LCD_FB0_ADDRESS 0xC0000000UL
 #define LCD_FB1_ADDRESS (LCD_FB0_ADDRESS + LCD_FRAME_STRIDE)
 #define LCD_BACKGROUND_ADDRESS (LCD_FB1_ADDRESS + LCD_FRAME_STRIDE)
+#define LCD_SNAPSHOT_ADDRESS (LCD_BACKGROUND_ADDRESS + LCD_FRAME_STRIDE)
 
 #define PLOT_LEFT 42
 #define PLOT_RIGHT 474
@@ -70,6 +71,7 @@
 #define TOUCH_COMMAND_RETRY_MS 150U
 #define TOUCH_COMMAND_RETRIES 3U
 #define PC_COMMAND_MAX_LENGTH 15U
+#define SAVE_KEY_DEBOUNCE_MS 35U
 
 #define CONTROL_SYNC_0 0xC5U
 #define CONTROL_SYNC_1 0x5CU
@@ -118,6 +120,8 @@ static uint16_t *const framebuffers[2] = {
 };
 static uint16_t *const background_framebuffer =
     (uint16_t *)LCD_BACKGROUND_ADDRESS;
+static uint16_t *const snapshot_framebuffer =
+    (uint16_t *)LCD_SNAPSHOT_ADDRESS;
 
 /*
  * 保存当前正在拼接的一帧。
@@ -139,6 +143,12 @@ static uint8_t pc_command_length;
 static uint16_t samples_ch1[APP_FRAME_MAX_SAMPLES];
 static uint16_t samples_ch2[APP_FRAME_MAX_SAMPLES];
 static uint8_t samples_digital[APP_FRAME_MAX_SAMPLES];
+static uint16_t snapshot_ch1[APP_FRAME_MAX_SAMPLES];
+static uint16_t snapshot_ch2[APP_FRAME_MAX_SAMPLES];
+static uint8_t snapshot_digital[APP_FRAME_MAX_SAMPLES];
+static uint16_t snapshot_count;
+static uint16_t snapshot_interval_us;
+static uint16_t snapshot_sequence;
 static uint16_t sample_count_ch1;
 static uint16_t sample_count_ch2;
 static uint16_t sample_count_digital;
@@ -175,6 +185,11 @@ static bool touch_was_down;
 static uint32_t touch_last_change_ms;
 static bool touch_ready;
 static bool channel_visible[CHANNEL_BUTTON_COUNT];
+static bool snapshot_ready;
+static bool save_key_raw_pressed;
+static uint32_t save_key_last_change_ms;
+static uint32_t save_status_until_ms;
+static bool save_status_ok;
 
 /*
  * 数组下标就是 timebase_index。
@@ -194,6 +209,10 @@ static uint32_t timebase_failed_at_ms;
 static bool timebase_user_selected;
 
 static void select_timebase(uint8_t index);
+static bool capture_snapshot(void);
+static void send_csv_snapshot(void);
+static void send_bmp_snapshot(void);
+static void refresh_timebase_screen(void);
 
 typedef enum
 {
@@ -560,6 +579,24 @@ static void draw_frequency_slider(uint16_t *framebuffer)
             knob_x + 2, FREQ_SLIDER_Y0 + 25, COLOR_CH1);
 }
 
+static void draw_save_status(uint16_t *framebuffer)
+{
+  uint32_t now = HAL_GetTick();
+  bool recent = (save_status_until_ms != 0U) &&
+                ((int32_t)(save_status_until_ms - now) > 0);
+  const char *label = snapshot_ready ? "SAVED" : "SAVE D4";
+  uint16_t color = snapshot_ready ? COLOR_OK : COLOR_MUTED;
+
+  if (recent)
+  {
+    label = save_status_ok ? "SAVED" : "NO DATA";
+    color = save_status_ok ? COLOR_OK : COLOR_ERROR;
+  }
+
+  fill_rect(framebuffer, 2, 242, 72, 266, COLOR_PANEL);
+  draw_text(framebuffer, 8, 249, label, color, 1);
+}
+
 static void draw_grid(uint16_t *framebuffer)
 {
   uint8_t i;
@@ -601,12 +638,11 @@ static void draw_grid(uint16_t *framebuffer)
   draw_text(framebuffer, 4, 123, "1.5", COLOR_MUTED, 1);
   draw_text(framebuffer, 4, 161, "0.0", COLOR_MUTED, 1);
   draw_text(framebuffer, 4, 4, "T/DIV", COLOR_MUTED, 1);
-  draw_text(framebuffer, 8, 248,
-            touch_ready ? "TOUCH OK" : "TOUCH ERR",
-            touch_ready ? COLOR_CH1 : COLOR_ERROR, 1);
+  draw_save_status(framebuffer);
   draw_timebase_buttons(framebuffer);
   draw_channel_buttons(framebuffer);
   draw_frequency_slider(framebuffer);
+  draw_save_status(framebuffer);
 }
 
 /*
@@ -1030,6 +1066,7 @@ static void render_waiting_screen(void)
   draw_timebase_buttons(framebuffer);
   draw_channel_buttons(framebuffer);
   draw_frequency_slider(framebuffer);
+  draw_save_status(framebuffer);
   draw_analog_measurement(framebuffer, 8, "CH1",
                           COLOR_CH1, &analog_measurements[0]);
   draw_analog_measurement(framebuffer, 150, "CH2",
@@ -1153,6 +1190,175 @@ static void append_number(char *output, uint8_t *position, uint8_t capacity,
   {
     output[(*position)++] = number[index++];
   }
+}
+
+static void write_le16(uint8_t *output, uint16_t value)
+{
+  output[0] = (uint8_t)(value & 0xFFU);
+  output[1] = (uint8_t)(value >> 8U);
+}
+
+static void write_le32(uint8_t *output, uint32_t value)
+{
+  output[0] = (uint8_t)(value & 0xFFU);
+  output[1] = (uint8_t)((value >> 8U) & 0xFFU);
+  output[2] = (uint8_t)((value >> 16U) & 0xFFU);
+  output[3] = (uint8_t)(value >> 24U);
+}
+
+/*
+ * 冻结当前屏幕和当前500点数据。
+ * BMP复制当前前台显存，CSV使用单独复制的CH1、CH2和数字位图。
+ */
+static bool capture_snapshot(void)
+{
+  uint16_t count = sample_count_ch1;
+  char line[64];
+  uint8_t position = 0U;
+
+  if (sample_count_ch2 > count) count = sample_count_ch2;
+  if (sample_count_digital > count) count = sample_count_digital;
+
+  if (count == 0U)
+  {
+    save_status_ok = false;
+    save_status_until_ms = HAL_GetTick() + 1500U;
+    BoardLink_WritePc((const uint8_t *)"SNAPSHOT,ERR,NO_DATA\r\n", 22U);
+    refresh_timebase_screen();
+    return false;
+  }
+
+  if (count > APP_FRAME_MAX_SAMPLES) count = APP_FRAME_MAX_SAMPLES;
+  memset(snapshot_ch1, 0, sizeof(snapshot_ch1));
+  memset(snapshot_ch2, 0, sizeof(snapshot_ch2));
+  memset(snapshot_digital, 0, sizeof(snapshot_digital));
+  memcpy(snapshot_ch1, samples_ch1, count * sizeof(uint16_t));
+  memcpy(snapshot_ch2, samples_ch2, count * sizeof(uint16_t));
+  memcpy(snapshot_digital, samples_digital, count * sizeof(uint8_t));
+  memcpy(snapshot_framebuffer, framebuffers[active_framebuffer],
+         LCD_FRAME_PIXELS * sizeof(uint16_t));
+
+  snapshot_count = count;
+  snapshot_interval_us = sample_interval_us;
+  snapshot_sequence = frame_sequence;
+  snapshot_ready = true;
+  save_status_ok = true;
+  save_status_until_ms = HAL_GetTick() + 1500U;
+
+  append_text(line, &position, sizeof(line), "SNAPSHOT,OK,POINTS=");
+  append_number(line, &position, sizeof(line), snapshot_count);
+  append_text(line, &position, sizeof(line), ",INTERVAL_US=");
+  append_number(line, &position, sizeof(line), snapshot_interval_us);
+  append_text(line, &position, sizeof(line), "\r\n");
+  BoardLink_WritePc((const uint8_t *)line, position);
+  refresh_timebase_screen();
+  return true;
+}
+
+static void send_csv_snapshot(void)
+{
+  char line[128];
+  uint8_t position;
+
+  if (!snapshot_ready)
+  {
+    BoardLink_WritePc((const uint8_t *)"CSV,ERR,NO_SNAPSHOT\r\n", 23U);
+    return;
+  }
+
+  position = 0U;
+  append_text(line, &position, sizeof(line), "CSV_BEGIN,POINTS=");
+  append_number(line, &position, sizeof(line), snapshot_count);
+  append_text(line, &position, sizeof(line), ",INTERVAL_US=");
+  append_number(line, &position, sizeof(line), snapshot_interval_us);
+  append_text(line, &position, sizeof(line), ",SEQUENCE=");
+  append_number(line, &position, sizeof(line), snapshot_sequence);
+  append_text(line, &position, sizeof(line), "\r\n");
+  BoardLink_WritePc((const uint8_t *)line, position);
+  BoardLink_WritePc(
+      (const uint8_t *)"index,time_us,ch1_mv,ch2_mv,d1,d2,d3\r\n",
+      (uint16_t)(sizeof("index,time_us,ch1_mv,ch2_mv,d1,d2,d3\r\n") - 1U));
+
+  for (uint16_t index = 0U; index < snapshot_count; ++index)
+  {
+    position = 0U;
+    append_number(line, &position, sizeof(line), index);
+    append_text(line, &position, sizeof(line), ",");
+    append_number(line, &position, sizeof(line),
+                  (uint32_t)index * snapshot_interval_us);
+    append_text(line, &position, sizeof(line), ",");
+    append_number(line, &position, sizeof(line), snapshot_ch1[index]);
+    append_text(line, &position, sizeof(line), ",");
+    append_number(line, &position, sizeof(line), snapshot_ch2[index]);
+    append_text(line, &position, sizeof(line), ",");
+    append_number(line, &position, sizeof(line),
+                  (snapshot_digital[index] & 0x01U) ? 1U : 0U);
+    append_text(line, &position, sizeof(line), ",");
+    append_number(line, &position, sizeof(line),
+                  (snapshot_digital[index] & 0x02U) ? 1U : 0U);
+    append_text(line, &position, sizeof(line), ",");
+    append_number(line, &position, sizeof(line),
+                  (snapshot_digital[index] & 0x04U) ? 1U : 0U);
+    append_text(line, &position, sizeof(line), "\r\n");
+    BoardLink_WritePc((const uint8_t *)line, position);
+  }
+
+  position = 0U;
+  append_text(line, &position, sizeof(line), "CSV_END,ROWS=");
+  append_number(line, &position, sizeof(line), snapshot_count);
+  append_text(line, &position, sizeof(line), "\r\n");
+  BoardLink_WritePc((const uint8_t *)line, position);
+}
+
+static void send_bmp_snapshot(void)
+{
+  static uint8_t row[LCD_WIDTH * 2U];
+  uint8_t header[66] = {0};
+  uint32_t pixel_bytes = LCD_FRAME_PIXELS * 2UL;
+  uint32_t file_size = 66UL + pixel_bytes;
+  char line[32];
+  uint8_t position = 0U;
+
+  if (!snapshot_ready)
+  {
+    BoardLink_WritePc((const uint8_t *)"BMP,ERR,NO_SNAPSHOT\r\n", 23U);
+    return;
+  }
+
+  header[0] = 'B';
+  header[1] = 'M';
+  write_le32(&header[2], file_size);
+  write_le16(&header[10], 66U);
+  write_le32(&header[14], 40U);
+  write_le32(&header[18], LCD_WIDTH);
+  write_le32(&header[22], LCD_HEIGHT);
+  write_le16(&header[26], 1U);
+  write_le16(&header[28], 16U);
+  write_le32(&header[30], 3UL);
+  write_le32(&header[34], pixel_bytes);
+  write_le32(&header[38], 2835UL);
+  write_le32(&header[42], 2835UL);
+  write_le32(&header[54], 0x0000F800UL);
+  write_le32(&header[58], 0x000007E0UL);
+  write_le32(&header[62], 0x0000001FU);
+
+  append_text(line, &position, sizeof(line), "BMP_BEGIN,SIZE=");
+  append_number(line, &position, sizeof(line), file_size);
+  append_text(line, &position, sizeof(line), "\r\n");
+  BoardLink_WritePc((const uint8_t *)line, position);
+  BoardLink_WritePc(header, sizeof(header));
+
+  for (int y = (int)LCD_HEIGHT - 1; y >= 0; --y)
+  {
+    const uint16_t *source = snapshot_framebuffer + ((uint32_t)y * LCD_WIDTH);
+    for (int x = 0; x < (int)LCD_WIDTH; ++x)
+    {
+      write_le16(&row[x * 2], source[x]);
+    }
+    BoardLink_WritePc(row, sizeof(row));
+  }
+
+  BoardLink_WritePc((const uint8_t *)"\r\nBMP_END\r\n", 11U);
 }
 
 /*
@@ -1456,6 +1662,24 @@ static void poll_pause_button(void)
       BoardLink_WritePc(
           (const uint8_t *)(waveform_paused ? "PAUSE=1\r\n" : "PAUSE=0\r\n"),
           (uint16_t)(sizeof("PAUSE=1\r\n") - 1U));
+    }
+  }
+}
+
+static void poll_save_button(void)
+{
+  bool pressed =
+      HAL_GPIO_ReadPin(SAVE_KEY_GPIO_Port, SAVE_KEY_Pin) == GPIO_PIN_RESET;
+  uint32_t now = HAL_GetTick();
+
+  if ((pressed != save_key_raw_pressed) &&
+      ((now - save_key_last_change_ms) >= SAVE_KEY_DEBOUNCE_MS))
+  {
+    save_key_raw_pressed = pressed;
+    save_key_last_change_ms = now;
+    if (pressed)
+    {
+      (void)capture_snapshot();
     }
   }
 }
@@ -1778,6 +2002,21 @@ static void parser_push(uint8_t byte, BoardLinkSource source)
         {
           select_timebase((uint8_t)(pc_command_buffer[3] - '0'));
         }
+        else if ((pc_command_length == 4U) &&
+                 (memcmp(pc_command_buffer, "SAVE", 4U) == 0))
+        {
+          (void)capture_snapshot();
+        }
+        else if ((pc_command_length == 3U) &&
+                 (memcmp(pc_command_buffer, "CSV", 3U) == 0))
+        {
+          send_csv_snapshot();
+        }
+        else if ((pc_command_length == 3U) &&
+                 (memcmp(pc_command_buffer, "BMP", 3U) == 0))
+        {
+          send_bmp_snapshot();
+        }
         else
         {
           uint16_t frequency;
@@ -2018,6 +2257,12 @@ void App_ReceiverInit(void)
   button_raw_pressed =
       HAL_GPIO_ReadPin(KEY_USER_GPIO_Port, KEY_USER_Pin) == GPIO_PIN_SET;
   button_last_change_ms = HAL_GetTick();
+  save_key_raw_pressed =
+      HAL_GPIO_ReadPin(SAVE_KEY_GPIO_Port, SAVE_KEY_Pin) == GPIO_PIN_RESET;
+  save_key_last_change_ms = HAL_GetTick();
+  snapshot_ready = false;
+  save_status_until_ms = 0U;
+  save_status_ok = false;
   draw_grid(framebuffers[0]);
   memcpy(background_framebuffer, framebuffers[0],
          LCD_FRAME_PIXELS * sizeof(uint16_t));
@@ -2075,6 +2320,7 @@ void App_ReceiverLoop(void)
 
   BoardLink_Service();
   poll_pause_button();
+  poll_save_button();
   poll_timebase_touch();
   poll_timebase_commands();
 
