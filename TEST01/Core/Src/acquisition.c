@@ -229,6 +229,16 @@ static uint8_t Acquisition_ConfigureAdcInputs(ProtocolScanMode scan_mode)
     ch1_sample_time = ADC_SAMPLETIME_3CYCLES;
     ch2_sample_time = ADC_SAMPLETIME_3CYCLES;
   }
+  else if (scan_mode == PROTOCOL_SCAN_1MS)
+  {
+    /*
+     * Both ADC channels must finish within the 20 us trigger period. A
+     * shorter conversion window also prevents stale conversions from being
+     * mixed between CH1 and CH2 when the display switches to 1 ms/div.
+     */
+    ch1_sample_time = ADC_SAMPLETIME_28CYCLES;
+    ch2_sample_time = ADC_SAMPLETIME_28CYCLES;
+  }
 
   channel_config.Channel = ADC_CHANNEL_7;
   channel_config.Rank = ADC_REGULAR_RANK_1;

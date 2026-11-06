@@ -37,6 +37,13 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
+#define MIC_EDGE_RAW_THRESHOLD 1600U
+#define MIC_FILTER_TAPS 5U
+#define MIC_CENTER_MV 1500
+#define MIC_MIN_AUTO_CENTER_SPAN_MV 120U
+#define MIC_MAX_DISPLAY_SPAN_MV 2400U
+#define MIC_RAIL_LOW_MV 250U
+#define MIC_RAIL_HIGH_MV 2900U
 
 /* USER CODE END PD */
 
@@ -74,6 +81,112 @@ static void MPU_Config(void);
 static uint16_t AdcRawToMillivolts(uint16_t raw)
 {
   return (uint16_t)(((uint32_t)raw * 3300U + 2047U) / 4095U);
+}
+
+/*
+ * Smooth the microphone signal with a short five-sample Gaussian kernel:
+ *
+ *     (1*previous2 + 2*previous1 + 3*current + 2*next1 + 1*next2) / 9
+ *
+ * A normal 500 Hz to 2 kHz sine wave only changes by a few hundred ADC
+ * counts between adjacent samples at the 20 us setting, so it is smoothed
+ * without losing its shape. A very large jump larger than
+ * MIC_EDGE_RAW_THRESHOLD is treated as a square-wave edge and kept unchanged.
+ */
+static uint16_t MicrophoneFilterSample(const uint16_t *samples, uint16_t index)
+{
+  uint16_t previous2 = samples[(index >= 2U) ? (index - 2U) : 0U];
+  uint16_t previous1 = samples[(index >= 1U) ? (index - 1U) : 0U];
+  uint16_t current = samples[index];
+  uint16_t next1 =
+      samples[(index + 1U < PROTOCOL_SAMPLES_PER_CHANNEL) ? (index + 1U)
+                                                         : index];
+  uint16_t next2 =
+      samples[(index + 2U < PROTOCOL_SAMPLES_PER_CHANNEL) ? (index + 2U)
+                                                         : index];
+  uint16_t delta_previous =
+      (current > previous1) ? (current - previous1) : (previous1 - current);
+  uint16_t delta_next =
+      (current > next1) ? (current - next1) : (next1 - current);
+
+  if ((delta_previous >= MIC_EDGE_RAW_THRESHOLD) ||
+      (delta_next >= MIC_EDGE_RAW_THRESHOLD))
+  {
+    return current;
+  }
+
+  return (uint16_t)((previous2 +
+                     (2U * previous1) +
+                     (3U * current) +
+                     (2U * next1) +
+                     next2 +
+                     (MIC_FILTER_TAPS / 2U)) /
+                    9U);
+}
+
+/*
+ * Software AC centering for microphone signals.
+ *
+ * The external microphone module can output a signal whose DC level is too
+ * close to 0 V. The negative half wave then reaches the ADC's lower limit,
+ * making the bottom of the sine look flat. Move the measured waveform's
+ * vertical midpoint to 1.5 V so both halves stay visible. If the peak-to-peak
+ * value is too large, compress it symmetrically instead of clipping it.
+ *
+ * A frame recognized as a real square wave bypasses this function. This keeps
+ * the rectangular-wave test signal in its original 0/3.3 V form.
+ */
+static void CenterMicrophoneWaveform(uint16_t *samples, uint16_t count,
+                                     uint8_t is_square_wave,
+                                     uint16_t *output_min,
+                                     uint16_t *output_max)
+{
+  uint16_t minimum = 0xFFFFU;
+  uint16_t maximum = 0U;
+  uint16_t span;
+  int32_t midpoint;
+  uint32_t scale_q12 = 4096U;
+  uint16_t new_minimum = 0xFFFFU;
+  uint16_t new_maximum = 0U;
+
+  if ((samples == NULL) || (count == 0U) || (is_square_wave != 0U))
+  {
+    return;
+  }
+
+  for (uint16_t i = 0U; i < count; ++i)
+  {
+    if (samples[i] < minimum) minimum = samples[i];
+    if (samples[i] > maximum) maximum = samples[i];
+  }
+  span = (uint16_t)(maximum - minimum);
+  if (span < MIC_MIN_AUTO_CENTER_SPAN_MV)
+  {
+    return;
+  }
+
+  midpoint = ((int32_t)minimum + (int32_t)maximum) / 2;
+  if (span > MIC_MAX_DISPLAY_SPAN_MV)
+  {
+    scale_q12 =
+        ((uint32_t)MIC_MAX_DISPLAY_SPAN_MV * 4096U + span / 2U) / span;
+  }
+
+  for (uint16_t i = 0U; i < count; ++i)
+  {
+    int32_t relative = ((int32_t)samples[i] - midpoint);
+    int32_t value =
+        MIC_CENTER_MV + (int32_t)((relative * (int32_t)scale_q12) / 4096);
+
+    if (value < 0) value = 0;
+    if (value > 3000) value = 3000;
+    samples[i] = (uint16_t)value;
+    if (samples[i] < new_minimum) new_minimum = samples[i];
+    if (samples[i] > new_maximum) new_maximum = samples[i];
+  }
+
+  if (output_min != NULL) *output_min = new_minimum;
+  if (output_max != NULL) *output_max = new_maximum;
 }
 
 /* USER CODE END 0 */
@@ -163,40 +276,23 @@ int main(void)
         uint16_t d1_max_high_run = 0U;
         uint16_t d2_high_count = 0U;
         uint16_t d3_high_count = 0U;
+        uint16_t ch2_low_rail_count = 0U;
+        uint16_t ch2_high_rail_count = 0U;
 
         for (uint16_t i = 0U; i < PROTOCOL_SAMPLES_PER_CHANNEL; ++i)
         {
-          uint16_t previous =
-              (i == 0U) ? ch2_samples[i] : ch2_samples[i - 1U];
-          uint16_t next =
-              (i + 1U >= PROTOCOL_SAMPLES_PER_CHANNEL)
-                  ? ch2_samples[i]
-                  : ch2_samples[i + 1U];
-          uint16_t current = ch2_samples[i];
-          uint16_t previous_delta =
-              (current > previous) ? (current - previous) : (previous - current);
-          uint16_t next_delta =
-              (current > next) ? (current - next) : (next - current);
-          uint16_t mic_filtered;
+          uint16_t mic_filtered = MicrophoneFilterSample(ch2_samples, i);
 
           /*
-           * 平滑普通麦克风噪声，但遇到方波的大幅跳变时直接保留原始点，
-           * 避免把一条垂直边沿平均成多个横向台阶。
+           * The five-point filter suppresses ADC and audio-module noise.
+           * Large edges are handled inside MicrophoneFilterSample(), so the
+           * same acquisition path still displays the generated square wave.
            */
-          if ((previous_delta >= 400U) || (next_delta >= 400U))
-          {
-            mic_filtered = current;
-          }
-          else
-          {
-            mic_filtered =
-                (uint16_t)((previous + (2U * current) + next + 2U) / 4U);
-          }
-
-          /* A short symmetric low-pass removes isolated microphone spikes. */
           ch2_mv[i] = AdcRawToMillivolts(mic_filtered);
           if (ch2_mv[i] < ch2_min) ch2_min = ch2_mv[i];
           if (ch2_mv[i] > ch2_max) ch2_max = ch2_mv[i];
+          if (ch2_mv[i] <= MIC_RAIL_LOW_MV) ch2_low_rail_count++;
+          if (ch2_mv[i] >= MIC_RAIL_HIGH_MV) ch2_high_rail_count++;
 
           ch1_raw_sum += ch1_samples[i];
           if (ch1_samples[i] < ch1_raw_min) ch1_raw_min = ch1_samples[i];
@@ -219,6 +315,24 @@ int main(void)
           }
           if ((digital_samples[i] & 0x02U) != 0U) d2_high_count++;
           if ((digital_samples[i] & 0x04U) != 0U) d3_high_count++;
+        }
+
+        /*
+         * A real 0/3.3 V square wave occupies both rails for much of the
+         * frame. A microphone transient may produce one large jump, but does
+         * not fill both rails. Requiring both rails avoids incorrectly
+         * disabling microphone centering during loud audio.
+         */
+        {
+          uint8_t is_square_wave =
+              ((ch2_low_rail_count * 4U) > PROTOCOL_SAMPLES_PER_CHANNEL) &&
+              ((ch2_high_rail_count * 4U) > PROTOCOL_SAMPLES_PER_CHANNEL);
+
+          CenterMicrophoneWaveform(ch2_mv,
+                                   PROTOCOL_SAMPLES_PER_CHANNEL,
+                                   is_square_wave,
+                                   &ch2_min,
+                                   &ch2_max);
         }
 
         /*

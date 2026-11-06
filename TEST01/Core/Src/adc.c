@@ -74,6 +74,10 @@ void MX_ADC3_Init(void)
   */
   sConfig.Channel = ADC_CHANNEL_0;
   sConfig.Rank = ADC_REGULAR_RANK_2;
+  /*
+   * CH2 uses a short sampling time because both channels must complete
+   * inside the 20 us sample interval of the 1 ms/div mode.
+   */
   sConfig.SamplingTime = ADC_SAMPLETIME_28CYCLES;
   if (HAL_ADC_ConfigChannel(&hadc3, &sConfig) != HAL_OK)
   {
